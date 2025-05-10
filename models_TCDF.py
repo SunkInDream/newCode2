@@ -7,14 +7,26 @@ import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 import os
 
-def prepare_data(file):
-    df = pd.read_csv(file)
-    data = df.values.astype(np.float32)
+def prepare_data(file_or_array):
+    """
+    处理输入数据，支持文件路径或NumPy数组
+    """
+    if isinstance(file_or_array, str):
+        # 处理文件路径
+        df = pd.read_csv(file_or_array)
+        data = df.values.astype(np.float32)
+        columns = df.columns.tolist()
+    else:
+        # 处理NumPy数组
+        data = file_or_array.astype(np.float32)
+        # 为数组生成默认列名
+        columns = [f'X{i}' for i in range(data.shape[1])]
+    
     mask = ~np.isnan(data)
     data = np.nan_to_num(data, nan=0.0)
     x = torch.tensor(data.T).unsqueeze(0)  # (1, num_features, seq_len)
     mask = torch.tensor(mask.T, dtype=torch.bool).unsqueeze(0)
-    return x, mask, df.columns.tolist()
+    return x, mask, columns
 
 def train(x, y, mask, model, optimizer, epochs):
     model.train()
@@ -69,8 +81,8 @@ def run_single_task(args):
 
     return target_idx, validated
 
-def compute_causal_matrix(file, params, gpu_id=0):
-    x, _, columns = prepare_data(file)
+def compute_causal_matrix(file_or_array, params, gpu_id=0):
+    x, mask, columns = prepare_data(file_or_array)
     num_features = x.shape[1]
     
     # 只使用指定 GPU 或 CPU
@@ -79,11 +91,11 @@ def compute_causal_matrix(file, params, gpu_id=0):
     # 串行处理各个特征
     results = []
     for i in range(num_features):
-        results.append(run_single_task((i, file, params, device)))
+        results.append(run_single_task((i, file_or_array, params, device)))
 
     matrix = np.zeros((num_features, num_features), dtype=int)
     for tgt, causes in results:
         for c in causes:
             matrix[tgt, c] = 1
-    return matrix, columns  
+    return matrix, columns
 

@@ -55,10 +55,7 @@ def FirstProcess(file):
     return df
 
 def SecondProcess(file, perturbation_prob=0.1, perturbation_scale=0.1):
-    # 先读取CSV文件
-    df = pd.read_csv(file)
-    # 然后创建一个副本
-    df_copy = df.copy()
+    df_copy = file.copy()
     
     for column in df_copy.columns:
         series = df_copy[column]
@@ -126,3 +123,9 @@ def SecondProcess(file, perturbation_prob=0.1, perturbation_scale=0.1):
                 df_copy.iloc[start + i, df_copy.columns.get_loc(column)] = value
 
     return df_copy
+def task(args):
+    file, params, gpu = args
+    matrix, columns = compute_causal_matrix(file, params, gpu)
+    print(f"\nResult for {os.path.basename(file)}:")
+    print(np.array(matrix))
+    return matrix   
