@@ -74,6 +74,8 @@ def compute_causal_matrix(file, params):
     num_features = x.shape[1]
     num_gpus = torch.cuda.device_count()
     devices = list(range(num_gpus)) if num_gpus > 0 else ['cpu']
+    #devices = list(range(1)) if num_gpus > 0 else ['cpu']
+    #devices = ['cpu']  # Use CPU only for simplicity    
     tasks = [(i, file, params, devices[i % len(devices)]) for i in range(num_features)]
 
     with ProcessPoolExecutor(max_workers=len(devices)) as executor:
