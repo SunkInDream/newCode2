@@ -69,20 +69,21 @@ def run_single_task(args):
 
     return target_idx, validated
 
-def compute_causal_matrix(file, params):
+def compute_causal_matrix(file, params, gpu_id=0):
     x, _, columns = prepare_data(file)
     num_features = x.shape[1]
-    num_gpus = torch.cuda.device_count()
-    devices = list(range(num_gpus)) if num_gpus > 0 else ['cpu']
-    #devices = list(range(1)) if num_gpus > 0 else ['cpu']
-    #devices = ['cpu']  # Use CPU only for simplicity    
-    tasks = [(i, file, params, devices[i % len(devices)]) for i in range(num_features)]
+    
+    # 只使用指定 GPU 或 CPU
+    device = gpu_id if torch.cuda.device_count() > 0 else 'cpu'
 
-    with ProcessPoolExecutor(max_workers=len(devices)) as executor:
-        results = list(executor.map(run_single_task, tasks))
+    # 串行处理各个特征
+    results = []
+    for i in range(num_features):
+        results.append(run_single_task((i, file, params, device)))
 
     matrix = np.zeros((num_features, num_features), dtype=int)
     for tgt, causes in results:
         for c in causes:
             matrix[tgt, c] = 1
-    return matrix, columns
+    return matrix, columns  
+
