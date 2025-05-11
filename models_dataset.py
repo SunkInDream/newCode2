@@ -75,7 +75,8 @@ def run_single_sample(args):
 
     return idx, result
 class MyDataset(Dataset):
-    def __init__(self, file_paths):   
+    def __init__(self, file_paths): 
+        self.file_paths = file_paths  
         self.original_data = []        # 含nan的原始数据 (list of ndarray)
         self.mask_data = []            # 掩码矩阵，1表示有值，0表示缺失 (list of ndarray)
         self.initial_filled = []       # 初次填补的结果 (list of ndarray)

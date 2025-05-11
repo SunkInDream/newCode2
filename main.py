@@ -1,12 +1,12 @@
 from models_dataset import *
 from models_CAUSAL import *
+from models_TCDF import *
 import os
 from concurrent.futures import ProcessPoolExecutor
-from models_TCDF import *
 import torch
 import numpy as np
 import multiprocessing
-
+multiprocessing.set_start_method('spawn', force=True)
 def task(args):
     array, params, gpu = args
     matrix, columns = compute_causal_matrix(array, params, gpu)
@@ -26,8 +26,7 @@ params = {
 
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method('spawn', force=True)
-    
+
     dataset = MyDataset('./data')
     print(len(dataset))
     print(dataset[0]['original'])
