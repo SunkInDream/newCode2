@@ -3,77 +3,66 @@ from torch.utils.data import Dataset
 import numpy as np
 import pandas as pd
 import os
+import queue
 from sklearn.cluster import KMeans
 from models_CAUSAL import *
 from models_TCDF import ADDSTCN
+from concurrent.futures import ProcessPoolExecutor
+from sklearn.model_selection import KFold
+from sklearn.impute import KNNImputer
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+from sklearn.impute import IterativeImputer
+from models_impute import process_single_matrix
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import warnings
+warnings.filterwarnings("ignore")
 def compute_single_causal(args):
     mat, params, gpu = args
     return compute_causal_matrix(mat, params, gpu)[0]
-def run_single_sample(args):
-    idx, matrix, mask, causal_matrix, params, device = args
-    torch.cuda.set_device(device)
-    matrix = torch.tensor(matrix, dtype=torch.float32).to(device)
-    mask = torch.tensor(mask, dtype=torch.bool).to(device)
-    causal_matrix = torch.tensor(causal_matrix, dtype=torch.int).to(device)
+def eval_worker(gpu_id, task_queue, result_queue):
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    device = torch.device("cuda:0")
+    print(f"[PID {os.getpid()}] 启动进程，绑定 GPU {gpu_id} → 设备 {device}")
 
-    time_steps, num_features = matrix.shape
-    x_list, y_list, m_list = [], [], []
+    while True:
+        try:
+            args = task_queue.get(timeout=5)
+        except queue.Empty:
+            break
+        if args is None:
+            break
 
-    for target in range(num_features):
-        # 获取前三个因果关系
-        causes = torch.where(causal_matrix[:, target] == 1)[0][:3].tolist()
-        if not causes:  # 如果没有因果关系，使用自身
-            causes = [target]
-        selected = causes + [target] if target not in causes else causes
-        
-        x = matrix[:, selected].T.unsqueeze(0)  # [1, len(selected), time_steps]
-        y = matrix[:, target].unsqueeze(0).unsqueeze(0)  # [1, 1, time_steps]
-        m = mask[:, target].unsqueeze(0).unsqueeze(0)  # [1, 1, time_steps]
-        x_list.append(x)
-        y_list.append(y)
-        m_list.append(m)
+        idx, mat, mask_eva, train_mask, test_idx, total_causal_matrix, model_params, epochs, lr, knn_k = args
+        print(f"[GPU {gpu_id}] 正在处理矩阵 {idx}")
 
-    x_batch = torch.cat(x_list, dim=0)  # [num_features, len(selected), time_steps]
-    y_batch = torch.cat(y_list, dim=0)  # [num_features, 1, time_steps]
-    m_batch = torch.cat(m_list, dim=0)  # [num_features, 1, time_steps]
+        from models_impute import process_single_matrix
+        _, ours = process_single_matrix((idx, mat, train_mask, total_causal_matrix, model_params, epochs, lr, device))
 
-    model = ADDSTCN(0, 4, params['layers'], params['kernel_size'], cuda=True, dilation_c=params['dilation_c']).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=params['lr'])
+        y = mat.flatten()[test_idx]
+        res = {'idx': idx, 'ours': ((ours.flatten()[test_idx] - y) ** 2).mean()}
+        missing = train_mask == 0
+        f0 = mat.copy(); f0[missing] = 0
+        res['zero'] = ((f0.flatten()[test_idx] - y) ** 2).mean()
+        med = np.median(mat[train_mask == 1])
+        fm = mat.copy(); fm[missing] = med
+        res['median'] = ((fm.flatten()[test_idx] - y) ** 2).mean()
+        mu = np.mean(mat[train_mask == 1])
+        fmu = mat.copy(); fmu[missing] = mu
+        res['mean'] = ((fmu.flatten()[test_idx] - y) ** 2).mean()
+        df = pd.DataFrame(mat)
+        dfm = df.mask(~train_mask.astype(bool))
+        res['ffill'] = ((dfm.ffill().fillna(0).values.flatten()[test_idx] - y) ** 2).mean()
+        res['bfill'] = ((dfm.bfill().fillna(0).values.flatten()[test_idx] - y) ** 2).mean()
+        knn_imp = KNNImputer(n_neighbors=knn_k)
+        res['knn'] = ((knn_imp.fit_transform(dfm).flatten()[test_idx] - y) ** 2).mean()
+        mice_imp = IterativeImputer(max_iter=10, random_state=0)
+        res['mice'] = ((mice_imp.fit_transform(dfm).flatten()[test_idx] - y) ** 2).mean()
 
-    for _ in range(params['epochs']):
-        model.train()
-        optimizer.zero_grad()
-        out = model(x_batch)  # [num_features, time_steps, 1]
-        out_reshaped = out.permute(0, 2, 1)  # [num_features, 1, time_steps]
-        loss = torch.nn.functional.mse_loss(
-            out_reshaped[m_batch].view(-1), 
-            y_batch[m_batch].view(-1)
-        )
-        loss.backward()
-        optimizer.step()
+        result_queue.put(res)
 
-    model.eval()
-    result = matrix.cpu().numpy().copy()  # 创建副本很重要
-    
-    with torch.no_grad():
-        pred = model(x_batch)  # [num_features, time_steps, 1]
-        pred_reshaped = pred.permute(0, 2, 1)  # [num_features, 1, time_steps]
-        
-        # 转换为NumPy并处理缺失值填充
-        pred_np = pred_reshaped.cpu().numpy()  # [num_features, 1, time_steps]
-        mask_np = m_batch.cpu().numpy()  # [num_features, 1, time_steps]
-        
-        # 按特征循环填充
-        for i in range(num_features):
-            # 找出当前特征的缺失位置（布尔数组形式）
-            missing_mask = ~mask_np[i, 0]  # [time_steps]
-            missing_indices = np.where(missing_mask)[0]  # 一维索引数组
-            
-            # 填充预测值
-            if len(missing_indices) > 0:
-                result[missing_indices, i] = pred_np[i, 0, missing_indices]
 
-    return idx, result
+
 class MyDataset(Dataset):
     def __init__(self, file_paths): 
         self.file_paths = file_paths  
@@ -108,7 +97,7 @@ class MyDataset(Dataset):
             #'label': self.labels[idx],
             #'total_causal_matrix': torch.tensor(self.total_causal_matrix) if self.total_causal_matrix is not None else None
         }
-    def causal_dis(self, n_cluster, params=None):
+    def agr(self, n_cluster, params=None):
         # 仅执行聚类，返回中心表示
         data = np.array([np.nanmean(x, axis=0) for x in self.initial_filled])
         data = np.nan_to_num(data, nan=0.0)
@@ -127,14 +116,57 @@ class MyDataset(Dataset):
             best_idx = idxs[np.argmin(dists)]
             self.center_repre.append(self.initial_filled[best_idx])
             
-        return self.center_repre  # 返回中心表示，不进行因果发现    
-    def impute_with_tcn(self, params):
-        gpus = list(range(torch.cuda.device_count())) or ['cpu']
-        tasks = [
-            (i, self.initial_filled[i], self.mask_data[i], self.total_causal_matrix, params, gpus[i % len(gpus)])
-            for i in range(len(self.initial_filled))
-        ]
+        return self.center_repre  # 返回中心表示，不进行因果发现  
+    def evaluate(self, k_folds=5, point_prob=0.1, block_prob=0.2,
+             block_min=1, block_max=5, model_params={},
+             knn_k=5, epochs=10, lr=0.001):
 
-        with ProcessPoolExecutor(max_workers=len(gpus)) as executor:
-            for idx, filled in executor.map(run_single_sample, tasks):
-                self.final_filled[idx] = filled
+        def gen_mask(mat):
+            m = (np.random.rand(*mat.shape) > point_prob).astype(np.float32)
+            if np.random.rand() < block_prob:
+                h = np.random.randint(block_min, block_max + 1)
+                w = np.random.randint(block_min, block_max + 1)
+                i = np.random.randint(0, mat.shape[0] - h + 1)
+                j = np.random.randint(0, mat.shape[1] - w + 1)
+                m[i:i + h, j:j + w] = 0
+            return m
+
+        gpus = list(range(torch.cuda.device_count()))
+        print(f"可用GPU: {gpus}")
+
+        task_queue = multiprocessing.Queue()
+        result_queue = multiprocessing.Queue()
+
+        for idx, mat in enumerate(self.final_filled):
+            mask_eva = gen_mask(mat)
+            avail = np.where(mask_eva.flatten() == 1)[0]
+            kf = KFold(n_splits=k_folds, shuffle=True, random_state=0)
+            for _, test_split in kf.split(avail):
+                test_idx = avail[test_split]
+                train_mask = mask_eva.flatten()
+                train_mask[test_idx] = 0
+                train_mask = train_mask.reshape(mat.shape)
+                task_queue.put((idx, mat, mask_eva, train_mask, test_idx,
+                                self.total_causal_matrix, model_params, epochs, lr, knn_k))
+
+        for _ in gpus:  # 哨兵 None 终止
+            task_queue.put(None)
+
+        workers = []
+        for gpu_id in gpus:
+            p = multiprocessing.Process(target=eval_worker, args=(gpu_id, task_queue, result_queue))
+            p.start()
+            workers.append(p)
+
+        results = []
+        expected = task_queue.qsize() - len(gpus)
+        for _ in range(expected):
+            results.append(result_queue.get())
+
+        for p in workers:
+            p.join()
+
+        df = pd.DataFrame(results).groupby('idx').mean()
+        print(df.T)
+
+
