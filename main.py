@@ -43,7 +43,7 @@ if __name__ == "__main__":
     print(dataset[0]['mask'])
     print(dataset[0]['initial_filled'])
     
-    centers = dataset.agr(8)
+    centers = dataset.agr(4)
     files = [os.path.join(dataset.file_paths, f) for f in os.listdir(dataset.file_paths) if f.endswith(".csv")]
     gpus = list(range(torch.cuda.device_count())) or ['cpu']
     tasks = [(f, params, gpus[i % len(gpus)]) for i, f in enumerate(files)]
@@ -82,8 +82,8 @@ if __name__ == "__main__":
     'kernel_size': 6,
     'dilation_c': 4,
     }
-    train_all_features_parallel(dataset, model_params, epochs=30, lr=0.01, evaluate=True,
-                                point_ratio=0, block_ratio=0,
+    train_all_features_parallel(dataset, model_params, epochs=300, lr=0.01, evaluate=True,
+                                point_ratio=0.1, block_ratio=0.6,
                                 block_min_w=10, block_max_w=15,
                                 block_min_h=10, block_max_h=15)
 
