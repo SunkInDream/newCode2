@@ -4,81 +4,191 @@ import torch.nn.functional as F
 from models_TCDF import ADDSTCN
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
+import pandas as pd
+from sklearn.impute import KNNImputer, SimpleImputer
+from sklearn.experimental import enable_iterative_imputer  # noqa
+from sklearn.impute import IterativeImputer
 
 def process_single_matrix(args):
-    idx, x_np, mask_np, causal_matrix, model_params, epochs, lr, gpu_id = args
-    
-    # 关键修改1：明确设置GPU环境变量
+    import random
+    idx, x_np, mask_np, causal_matrix, model_params, epochs, lr, gpu_id, evaluate, \
+        point_ratio, block_ratio, block_min_w, block_max_w, block_min_h, block_max_h = args
+
     if gpu_id != 'cpu':
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-        device = 'cuda:0'  # 在当前进程中只能看到一个GPU，所以始终是cuda:0
+        device = 'cuda:0'
     else:
         device = 'cpu'
-        
-    # 声明使用指定设备
-    print(f"处理矩阵 {idx}，使用设备: {device}")
-    
+    print(f'Processing matrix {idx} on {device}')
+
     seq_len, total_features = x_np.shape
     filled = x_np.copy()
+    eval_mask = None
 
+    if evaluate:
+        rng = np.random.default_rng()
+        ones = np.argwhere(mask_np == 1)
+        n_total = len(ones)
+        col_counts = mask_np.sum(axis=0)
+        mask_temp = mask_np.copy()
+
+        # === 点缺失 ===
+        n_point = max(1, int(n_total * point_ratio))
+        point_remove = ones[rng.choice(n_total, n_point, replace=False)]
+
+        valid_remove = []
+        for i, j in point_remove:
+            if col_counts[j] > 1:
+                valid_remove.append((i, j))
+                col_counts[j] -= 1
+        for i, j in valid_remove:
+            mask_temp[i, j] = 2
+
+        # === 块缺失 ===
+        area_removed = 0
+        target_area = int(n_total * block_ratio)
+        col_counts = mask_temp.sum(axis=0)  # 每列有效值计数
+
+        while area_removed < target_area:
+            h = random.randint(block_min_h, block_max_h)
+            w = random.randint(block_min_w, block_max_w)
+            i = random.randint(0, seq_len - h)
+            j = random.randint(0, total_features - w)
+
+            block = []
+            for r in range(i, i + h):
+                for c in range(j, j + w):
+                    if mask_temp[r, c] == 1 and col_counts[c] > 1:
+                        block.append((r, c))
+
+            for r, c in block:
+                mask_temp[r, c] = 2
+                col_counts[c] -= 1
+
+            area_removed += len(block)
+
+    # === 训练并填补 ===
     for target in range(total_features):
-        causal_indices = list(np.where(causal_matrix[:, target] == 1)[0])
-        if target not in causal_indices:
-            causal_indices.append(target)
+        inds = list(np.where(causal_matrix[:, target] == 1)[0])
+        if target not in inds:
+            inds.append(target)
         else:
-            causal_indices.remove(target)
-            causal_indices.append(target)
-        causal_indices = causal_indices[:3] + [target]  # 限制为3+1列
+            inds.remove(target)
+            inds.append(target)
+        inds = inds[:3] + [target]
 
-        input_data = x_np[:, causal_indices].T[np.newaxis, ...]  # (1, 4, seq_len)
-        target_data = x_np[:, target][np.newaxis, :, np.newaxis]  # (1, seq_len, 1)
-        target_mask = mask_np[:, target][np.newaxis, :, np.newaxis]
+        inp = x_np[:, inds].T[np.newaxis, ...]
+        y_np = x_np[:, target][np.newaxis, :, None]
+        m_np = (mask_np[:, target] == 1)[np.newaxis, :, None]
 
-        x = torch.tensor(input_data, dtype=torch.float32).to(device)
-        y = torch.tensor(target_data, dtype=torch.float32).to(device)
-        mask = torch.tensor(target_mask, dtype=torch.float32).to(device)
+        x = torch.tensor(inp, dtype=torch.float32).to(device)
+        y = torch.tensor(y_np, dtype=torch.float32).to(device)
+        m = torch.tensor(m_np, dtype=torch.float32).to(device)
 
-        model = ADDSTCN(target, input_size=4, cuda=(device=='cuda:0'), **model_params).to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        model = ADDSTCN(target, input_size=len(inds),
+                        cuda=(device == 'cuda:0'),
+                        **model_params).to(device)
+        optim = torch.optim.Adam(model.parameters(), lr=lr)
 
-        # 关键修改2：添加进度报告
         for epoch in range(epochs):
             model.train()
             pred = model(x)
-            loss = F.mse_loss(pred * mask, y * mask)
-            optimizer.zero_grad()
+            loss = F.mse_loss(pred * m, y * m)
+            optim.zero_grad()
             loss.backward()
-            optimizer.step()
-            
-            # 每5轮显示进度
+            optim.step()
             if epoch % 5 == 0:
-                print(f"矩阵 {idx}, 特征 {target}/{total_features}, Epoch {epoch}/{epochs}, Loss: {loss.item():.6f}")
+                print(f'matrix {idx}, feat {target}/{total_features}, epoch {epoch}, loss {loss.item():.6f}')
 
         model.eval()
         with torch.no_grad():
-            pred = model(x).squeeze().cpu().numpy()
-            missing_idx = np.where(mask_np[:, target] == 0)[0]
-            filled[missing_idx, target] = pred[missing_idx]
+            out = model(x).squeeze().cpu().numpy()
+            to_fill = np.where(mask_np[:, target] != 1)[0]
+            filled[to_fill, target] = out[to_fill]
 
-    return idx, filled
+    metrics = {}
+    if evaluate:
+        true = x_np[eval_mask]
+        pred = filled[eval_mask]
+        metrics['model'] = ((pred - true) ** 2).mean()
 
-def train_all_features_parallel(dataset, model_params, epochs=10, lr=0.001):
-    assert dataset.total_causal_matrix is not None, "total_causal_matrix is required"
-    causal_matrix = dataset.total_causal_matrix
-    
-    # 获取实际可用的GPU ID
-    available_gpus = list(range(torch.cuda.device_count())) or ['cpu']
-    print(f"可用GPU: {available_gpus}")
-    
-    # 准备任务列表，每个任务包含所有必要参数
+        z = x_np.copy()
+        z[mask_np != 1] = 0
+        metrics['zero'] = ((z[eval_mask] - true) ** 2).mean()
+
+        med = np.nanmedian(np.where(mask_np == 1, x_np, np.nan), axis=0)
+        mdf = x_np.copy()
+        for j in range(total_features):
+            mdf[mask_np[:, j] != 1, j] = med[j]
+        metrics['median'] = ((mdf[eval_mask] - true) ** 2).mean()
+
+        mn = np.nanmean(np.where(mask_np == 1, x_np, np.nan), axis=0)
+        mnf = x_np.copy()
+        for j in range(total_features):
+            mnf[mask_np[:, j] != 1, j] = mn[j]
+        metrics['mean'] = ((mnf[eval_mask] - true) ** 2).mean()
+
+        df = pd.DataFrame(x_np.copy())
+        df_mask = pd.DataFrame(mask_np.copy())
+        df[df_mask != 1] = np.nan
+        bfill = df.bfill().ffill().values
+        ffill = df.ffill().bfill().values
+        metrics['bfill'] = ((bfill[eval_mask] - true) ** 2).mean()
+        metrics['ffill'] = ((ffill[eval_mask] - true) ** 2).mean()
+
+        knn = KNNImputer()
+        knnf = knn.fit_transform(np.where(mask_np == 1, x_np, np.nan))
+        metrics['knn'] = ((knnf[eval_mask] - true) ** 2).mean()
+
+        mice = IterativeImputer()
+        micef = mice.fit_transform(np.where(mask_np == 1, x_np, np.nan))
+        metrics['mice'] = ((micef[eval_mask] - true) ** 2).mean()
+
+    return idx, filled, metrics
+
+def train_all_features_parallel(dataset, model_params, epochs=300, lr=0.01, evaluate=False,
+                                point_ratio=0.1, block_ratio=0.1,
+                                block_min_w=2, block_max_w=5,
+                                block_min_h=2, block_max_h=5):
+    assert dataset.total_causal_matrix is not None
+    cm = dataset.total_causal_matrix
+
+    gpus = list(range(torch.cuda.device_count())) or ['cpu']
+    print(f'Available GPUs: {gpus}')
+
     tasks = [
-        (i, dataset.initial_filled[i], dataset.mask_data[i], causal_matrix, 
-         model_params, epochs, lr, available_gpus[i % len(available_gpus)])
+        (i,
+         dataset.initial_filled[i],
+         dataset.mask_data[i],
+         cm,
+         model_params,
+         epochs,
+         lr,
+         gpus[i % len(gpus)],
+         evaluate,
+         point_ratio,
+         block_ratio,
+         block_min_w,
+         block_max_w,
+         block_min_h,
+         block_max_h)
         for i in range(len(dataset.initial_filled))
     ]
-    
-    # 使用与可用GPU数量相同的工作进程
-    with ProcessPoolExecutor(max_workers=len(available_gpus)) as executor:
-        for idx, filled_matrix in executor.map(process_single_matrix, tasks):
-            dataset.final_filled[idx] = filled_matrix
-            print(f"矩阵 {idx} 处理完成")
+
+    results = []
+    with ProcessPoolExecutor(max_workers=len(gpus)) as executor:
+        for idx, filled_mat, metrics in executor.map(process_single_matrix, tasks):
+            dataset.final_filled[idx] = filled_mat
+            if evaluate:
+                metrics['idx'] = idx
+                results.append(metrics)
+            print(f'Matrix {idx} done')
+
+    if evaluate:
+        df = pd.DataFrame(results).sort_values('idx').set_index('idx')
+        
+        # 添加以下几行代码，禁用科学计数法显示
+        pd.set_option('display.float_format', '{:.6f}'.format)
+        
+        print('\nEvaluation MSE comparison:')
+        print(df)

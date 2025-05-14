@@ -79,20 +79,11 @@ if __name__ == "__main__":
         dataset.total_causal_matrix = new_matrix
     model_params = {
     'num_levels': 3,
-    'kernel_size': 2,
-    'dilation_c': 2,
+    'kernel_size': 6,
+    'dilation_c': 4,
     }
-    train_all_features_parallel(dataset, model_params, epochs=10, lr=0.01)
-    print(dataset.final_filled[0])
-    print(dataset.initial_filled[0])
-    dataset.evaluate(
-        k_folds=5,
-        point_prob=0.1,
-        block_prob=0.6,
-        block_min=10,
-        block_max=15,
-        model_params=model_params,
-        knn_k=5,
-        epochs=10,
-        lr=0.01
-    )
+    train_all_features_parallel(dataset, model_params, epochs=30, lr=0.01, evaluate=True,
+                                point_ratio=0, block_ratio=0,
+                                block_min_w=10, block_max_w=15,
+                                block_min_h=10, block_max_h=15)
+
