@@ -4,6 +4,7 @@ from models_dataset import *
 from models_CAUSAL import *
 from models_TCDF import *
 from models_impute import *
+from models_downstream import *
 import torch
 import numpy as np
 import multiprocessing
@@ -17,9 +18,15 @@ params = {
     'optimizername': 'Adam',
     'significance': 0.5
 }
-
 def task(args):
     file, params, gpu = args
+    
+    # 添加处理NumPy数组的代码
+    if isinstance(file, np.ndarray):
+        file_name = f"array_data_{id(file)}"  # 为数组创建唯一标识符
+    else:
+        file_name = os.path.basename(file)
+        
     if gpu != 'cpu':
         # 设置环境变量限制可见GPU
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
@@ -31,25 +38,44 @@ def task(args):
         
     # 将正确映射后的device传递给函数，而不是原始gpu编号
     matrix, columns = compute_causal_matrix(file, params, device)
-    print(f"\nResult for {os.path.basename(file)}: 使用设备 {device}")
+    print(f"\nResult for {file_name}: 使用设备 {device}")
     print(np.array(matrix))
     return matrix
 
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn', force=True)
-    dataset = MyDataset('./data')
+    dataset = MyDataset('./data', tag_file='./static_tag.csv', tag_name='DIEINHOSPITAL', id_name='ICUSTAY_ID')
     print(len(dataset))
     print(dataset[0]['original'])
     print(dataset[0]['mask'])
     print(dataset[0]['initial_filled'])
+    print(dataset[0]['file_names'])
+    print(dataset[4]['labels'])
+     # 1. 执行聚类并获取中心点表示
+    centers = dataset.agr(20)
+     # 2. 只使用聚类中心的代表文件计算因果矩阵
+    center_files = []
+    files = [os.path.join(dataset.file_paths, f) for f in os.listdir(dataset.file_paths) if f.endswith('.csv')]
     
-    centers = dataset.agr(4)
-    files = [os.path.join(dataset.file_paths, f) for f in os.listdir(dataset.file_paths) if f.endswith(".csv")]
-    gpus = list(range(torch.cuda.device_count())) or ['cpu']
-    tasks = [(f, params, gpus[i % len(gpus)]) for i, f in enumerate(files)]
-
+    # 如果 center_repre 是数组，将其转换为实际文件路径
+    if isinstance(dataset.center_repre, np.ndarray):
+        # 使用索引获取文件
+        for idx in dataset.center_repre:
+            if isinstance(idx, (int, np.integer)) and 0 <= idx < len(files):
+                center_files.append(files[idx])
+    else:
+        # 如果已经是文件路径列表，直接使用
+        center_files = dataset.center_repre
+    
+    print(f"使用{len(center_files)}个聚类中心代表进行因果矩阵计算")
+    
+    # 3. 为聚类中心分配GPU资源
+    gpus = list(range(torch.cuda.device_count()-1)) or ['cpu']
+    tasks = [(f, params, gpus[i % len(gpus)]) for i, f in enumerate(center_files)]
+    
     with ProcessPoolExecutor(max_workers=len(gpus)) as executor:
         results = list(executor.map(task, tasks))
+    
 
 
     if results:
@@ -78,12 +104,12 @@ if __name__ == "__main__":
         # 更新total_causal_matrix
         dataset.total_causal_matrix = new_matrix
     model_params = {
-    'num_levels': 3,
+    'num_levels': 6,
     'kernel_size': 6,
     'dilation_c': 4,
     }
-    train_all_features_parallel(dataset, model_params, epochs=300, lr=0.01, evaluate=True,
-                                point_ratio=0.1, block_ratio=0.6,
-                                block_min_w=10, block_max_w=15,
-                                block_min_h=10, block_max_h=15)
-
+    train_all_features_parallel(dataset, model_params, epochs=150, lr=0.02, evaluate=True,
+                                point_ratio=0.1, block_ratio=0.4,
+                                block_min_w=20, block_max_w=30,
+                                block_min_h=5, block_max_h=10)
+    evaluate_downstream_methods(dataset)
