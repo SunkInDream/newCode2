@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import multiprocessing
 from sklearn.model_selection import KFold
-from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.metrics import f1_score, roc_auc_score, accuracy_score, precision_score, recall_score
 from sklearn.impute import KNNImputer, SimpleImputer
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
@@ -134,8 +134,12 @@ def evaluate_model(X_train, y_train, X_test, y_test, input_dim, hidden_dim=64, e
     # 计算指标
     f1 = f1_score(y_test, y_pred)
     auroc = roc_auc_score(y_test, y_prob)
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred, zero_division=0)
+    recall = recall_score(y_test, y_pred, zero_division=0)
     
-    return f1, auroc
+    return f1, auroc, accuracy, precision, recall
+
 
 def evaluate_filling_method(method_name, filled_data, labels, k_folds=4, device='cuda'):
     """使用K折交叉验证评估特定填充方法"""
@@ -156,6 +160,9 @@ def evaluate_filling_method(method_name, filled_data, labels, k_folds=4, device=
     
     f1_scores = []
     auroc_scores = []
+    accuracy_scores = []
+    precision_scores = []
+    recall_scores = []
     
     for fold, (train_idx, test_idx) in enumerate(kf.split(range(len(X)))):
         print(f"  执行第 {fold+1}/{min(k_folds, len(y))} 折...")
@@ -165,15 +172,28 @@ def evaluate_filling_method(method_name, filled_data, labels, k_folds=4, device=
         y_test = y[test_idx]
         
         input_dim = X[0].shape[1]  # 特征维度
-        f1, auroc = evaluate_model(X_train, y_train, X_test, y_test, input_dim, device=device)
+        f1, auroc, accuracy, precision, recall = evaluate_model(X_train, y_train, X_test, y_test, input_dim, device=device)
         f1_scores.append(f1)
         auroc_scores.append(auroc)
+        accuracy_scores.append(accuracy)
+        precision_scores.append(precision)
+        recall_scores.append(recall)
     
     avg_f1 = np.mean(f1_scores)
     avg_auroc = np.mean(auroc_scores)
-    print(f"  {method_name} 评估完成: 平均F1={avg_f1:.4f}, 平均AUROC={avg_auroc:.4f}")
+    avg_accuracy = np.mean(accuracy_scores)
+    avg_precision = np.mean(precision_scores)
+    avg_recall = np.mean(recall_scores)
     
-    return {'f1': avg_f1, 'auroc': avg_auroc}
+    print(f"  {method_name} 评估完成: 平均F1={avg_f1:.4f}, 平均AUROC={avg_auroc:.4f}, 准确率={avg_accuracy:.4f}, 精确率={avg_precision:.4f}, 召回率={avg_recall:.4f}")
+    
+    return {
+        'f1': avg_f1, 
+        'auroc': avg_auroc,
+        'accuracy': avg_accuracy,
+        'precision': avg_precision,
+        'recall': avg_recall
+    }
 
 def process_method(args):
     """单个进程内评估填充方法的包装函数"""
