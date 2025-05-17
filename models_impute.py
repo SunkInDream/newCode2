@@ -115,44 +115,6 @@ def process_single_matrix(args):
                     eval_mask[r, c] = True
             area_removed += len(block)
 
-        # # 再填补一次，评估用
-        # re_filled = filled.copy()
-        # for target in range(total_features):
-        #     inds = list(np.where(causal_matrix[:, target] == 1)[0])
-        #     if target not in inds:
-        #         inds.append(target)
-        #     else:
-        #         inds.remove(target)
-        #         inds.append(target)
-        #     inds = inds[:3] + [target]
-
-        #     inp = filled[:, inds].T[np.newaxis, ...]
-        #     y_np = filled[:, target][np.newaxis, :, None]
-        #     m_np = (mask_temp[:, target] == 1)[np.newaxis, :, None]
-
-        #     x = torch.tensor(inp, dtype=torch.float32).to(device)
-        #     y = torch.tensor(y_np, dtype=torch.float32).to(device)
-        #     m = torch.tensor(m_np, dtype=torch.float32).to(device)
-
-        #     model = ADDSTCN(target, input_size=len(inds),
-        #                     cuda=(device == 'cuda:0'),
-        #                     **model_params).to(device)
-        #     optim = torch.optim.Adam(model.parameters(), lr=lr)
-
-        #     for epoch in range(epochs):
-        #         model.train()
-        #         pred = model(x)
-        #         loss = F.mse_loss(pred * m, y * m)
-        #         optim.zero_grad()
-        #         loss.backward()
-        #         optim.step()
-
-        #     model.eval()
-        #     with torch.no_grad():
-        #         out = model(x).squeeze().cpu().numpy()
-        #         to_fill = np.where(mask_temp[:, target] == 0)[0]
-        #         re_filled[to_fill, target] = out[to_fill]
-
         # === 统一评估 ===
         true = initial_filled_copy[eval_mask]
         metrics['model'] = ((initial_filled[eval_mask] - true) ** 2).mean()
@@ -258,5 +220,17 @@ def train_all_features_parallel(dataset, model_params, epochs=10, lr=0.001, eval
         pd.set_option('display.float_format', '{:.6f}'.format)
         print('\nAverage Evaluation MSE across all matrices:')
         print(mean_metrics)
-
+        # 添加下面几行代码，将结果保存到文件
+        results_dir = 'evaluation_results'
+        os.makedirs(results_dir, exist_ok=True)
+        results_file = os.path.join(results_dir, 'imputation_results.csv')
+        df.to_csv(results_file, index=False)
+        
+        # 保存平均指标到单独的文件
+        summary_file = os.path.join(results_dir, 'imputation_summary.txt')
+        with open(summary_file, 'w') as f:
+            f.write('Average Evaluation MSE across all matrices:\n')
+            f.write(mean_metrics.to_string())
+        
+        print(f'\n结果已保存到 {results_file} 和 {summary_file}')
     return eval_results if evaluate else None

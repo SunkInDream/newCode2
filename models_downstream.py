@@ -84,6 +84,8 @@ def fill_with_method(data, mask, method):
         mice_imputer = IterativeImputer(max_iter=10, random_state=0, 
                                       skip_complete=True)
         filled = mice_imputer.fit_transform(initial_fill)
+    elif method == 'model':
+        process_single_matrix(args)
     
     return filled
 
@@ -145,10 +147,6 @@ def evaluate_filling_method(method_name, filled_data, labels, k_folds=4, device=
         if data is not None and label is not None:
             valid_indices.append(i)
     
-    # if len(valid_indices) < 10:  # 样本太少
-    #     print(f"  警告: 有效样本数量过少 ({len(valid_indices)})")
-    #     return {'f1': 0, 'auroc': 0}
-    
     X = [filled_data[i] for i in valid_indices]
     y = [labels[i] for i in valid_indices]
     y = np.array(y, dtype=np.float32)
@@ -166,18 +164,10 @@ def evaluate_filling_method(method_name, filled_data, labels, k_folds=4, device=
         X_test = [X[i] for i in test_idx]
         y_test = y[test_idx]
         
-        # # 如果某一折中只有一种类别，跳过
-        # if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
-        #     print("  警告: 该折中类别不足，跳过")
-        #     continue
-        
         input_dim = X[0].shape[1]  # 特征维度
         f1, auroc = evaluate_model(X_train, y_train, X_test, y_test, input_dim, device=device)
         f1_scores.append(f1)
         auroc_scores.append(auroc)
-    
-    # if not f1_scores:
-    #     return {'f1': 0, 'auroc': 0}
     
     avg_f1 = np.mean(f1_scores)
     avg_auroc = np.mean(auroc_scores)
@@ -207,7 +197,7 @@ def process_method(args):
     result = evaluate_filling_method(method, filled_data, labels, k_folds, device)
     return_dict[method] = result
 
-def evaluate_downstream_methods(dataset):
+def evaluate_downstream_methods(dataset, k_folds=4):
     """评估不同填充方法对下游分类任务的影响"""
     print("\n" + "="*50)
     print("开始下游任务评估: LSTM 二分类任务")
@@ -230,12 +220,14 @@ def evaluate_downstream_methods(dataset):
     # 创建并启动进程
     for i, method in enumerate(methods):
         device = devices[i % len(devices)]
-        data = dataset.final_filled
         mask = dataset.mask_data
-        
+        if method == 'model':
+            data = dataset.final_filled  # 对final/model方法用最终填充数据
+        else:
+            data = dataset.initial_filled  # 对基准方法用初始数据
         p = multiprocessing.Process(
             target=process_method, 
-            args=((method, data, mask, dataset.labels, device, 5, return_dict),)
+            args=((method, data, mask, dataset.labels, device, k_folds, return_dict),)
         )
         processes.append(p)
         p.start()
@@ -253,5 +245,30 @@ def evaluate_downstream_methods(dataset):
     for method in methods:
         if method in results:
             print(f"{method:<10}{results[method]['f1']:.4f}{'':<10}{results[method]['auroc']:.4f}")
+    
+    # 添加保存结果到文件的代码
+    results_dir = 'evaluation_results'
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # 创建结果文件
+    results_file = os.path.join(results_dir, 'downstream_comparison.txt')
+    with open(results_file, 'w') as f:
+        f.write("===== 填充方法性能比较 =====\n")
+        f.write(f"{'方法':<10}{'F1分数':<15}{'AUROC分数':<15}\n")
+        f.write("-" * 40 + "\n")
+        
+        for method in methods:
+            if method in results:
+                f.write(f"{method:<10}{results[method]['f1']:.4f}{'':<10}{results[method]['auroc']:.4f}\n")
+    
+    # 同时保存为CSV格式便于后续分析
+    df_results = pd.DataFrame([
+        {'method': method, 'f1': results[method]['f1'], 'auroc': results[method]['auroc']}
+        for method in methods if method in results
+    ])
+    csv_file = os.path.join(results_dir, 'downstream_comparison.csv')
+    df_results.to_csv(csv_file, index=False)
+    
+    print(f"\n结果已保存到 {results_file} 和 {csv_file}")
     
     return results

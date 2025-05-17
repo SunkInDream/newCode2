@@ -1,4 +1,5 @@
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from models_dataset import *
 from models_CAUSAL import *
@@ -9,7 +10,6 @@ import numpy as np
 import multiprocessing
 import warnings
 from models_dataset import *  # Ensure MyDataset is imported
-
 def task(args):
     file, params, gpu = args
     
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     print(dataset[0]['file_names'])
     print(dataset[0]['labels'])
      # 1. 执行聚类并获取中心点表示
-    centers = dataset.agregate(10)
+    centers = dataset.agregate(3)
      # 2. 只使用聚类中心的代表文件计算因果矩阵
     center_files = []
     files = [os.path.join(dataset.file_paths, f) for f in os.listdir(dataset.file_paths) if f.endswith('.csv')]
@@ -93,8 +93,8 @@ if __name__ == "__main__":
     'kernel_size': 6,
     'dilation_c': 4,
     }
-    # train_all_features_parallel(dataset, model_params, epochs=150, lr=0.02, evaluate=True,
-    #                             point_ratio=0.1, block_ratio=0.4,
-    #                             block_min_w=20, block_max_w=30,
-    #                             block_min_h=5, block_max_h=10)
-    evaluate_downstream_methods(dataset)
+    train_all_features_parallel(dataset, model_params, epochs=150, lr=0.02, evaluate=True,
+                                point_ratio=0.1, block_ratio=0.4,
+                                block_min_w=20, block_max_w=30,
+                                block_min_h=5, block_max_h=10)
+    evaluate_downstream_methods(dataset,k_folds=2)

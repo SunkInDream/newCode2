@@ -1,0 +1,9 @@
+Average Evaluation MSE across all matrices:
+model       1.206690
+zero     2438.662598
+median     13.565922
+mean       13.715811
+bfill       3.761690
+ffill       4.137912
+knn         7.658641
+mice       11.097690
