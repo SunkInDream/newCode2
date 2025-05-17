@@ -11,7 +11,7 @@ from sklearn.metrics import f1_score, roc_auc_score, accuracy_score, precision_s
 from sklearn.impute import KNNImputer, SimpleImputer
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
-from models_dataset import MyDataset
+from models_dataset import *
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -255,40 +255,48 @@ def evaluate_downstream_methods(dataset, k_folds=4):
     # 等待完成并打印结果
     for p in processes:
         p.join()
-    
+
     # 打印结果表格
     results = dict(return_dict)
     print("\n===== 填充方法性能比较 =====")
-    print(f"{'方法':<10}{'F1分数':<15}{'AUROC分数':<15}")
-    print("-" * 40)
-    
+    print(f"{'方法':<10}{'accuracy':<15}{'precision':<15}{'recall':<15}{'F1分数':<15}{'AUROC分数':<15}")
+    print("-" * 75)  # 增加分隔线长度以覆盖所有列
+
     for method in methods:
         if method in results:
-            print(f"{method:<10}{results[method]['f1']:.4f}{'':<10}{results[method]['auroc']:.4f}")
-    
+            print(f"{method:<10}{results[method]['accuracy']:.4f}{'':<10}{results[method]['precision']:.4f}{'':<10}{results[method]['recall']:.4f}{'':<10}{results[method]['f1']:.4f}{'':<10}{results[method]['auroc']:.4f}")
+
     # 添加保存结果到文件的代码
     results_dir = 'evaluation_results'
     os.makedirs(results_dir, exist_ok=True)
-    
+
     # 创建结果文件
     results_file = os.path.join(results_dir, 'downstream_comparison.txt')
     with open(results_file, 'w') as f:
         f.write("===== 填充方法性能比较 =====\n")
-        f.write(f"{'方法':<10}{'F1分数':<15}{'AUROC分数':<15}\n")
-        f.write("-" * 40 + "\n")
+        f.write(f"{'方法':<10}{'accuracy':<15}{'precision':<15}{'recall':<15}{'F1分数':<15}{'AUROC分数':<15}\n")
+        f.write("-" * 75 + "\n")  # 增加分隔线长度
         
         for method in methods:
             if method in results:
-                f.write(f"{method:<10}{results[method]['f1']:.4f}{'':<10}{results[method]['auroc']:.4f}\n")
-    
+                # 添加换行符确保每个方法在单独一行
+                f.write(f"{method:<10}{results[method]['accuracy']:.4f}{'':<10}{results[method]['precision']:.4f}{'':<10}{results[method]['recall']:.4f}{'':<10}{results[method]['f1']:.4f}{'':<10}{results[method]['auroc']:.4f}\n")
+
     # 同时保存为CSV格式便于后续分析
     df_results = pd.DataFrame([
-        {'method': method, 'f1': results[method]['f1'], 'auroc': results[method]['auroc']}
+        {
+            'method': method,
+            'accuracy': results[method]['accuracy'], 
+            'precision': results[method]['precision'], 
+            'recall': results[method]['recall'], 
+            'f1': results[method]['f1'],
+            'auroc': results[method]['auroc']
+        }
         for method in methods if method in results
     ])
     csv_file = os.path.join(results_dir, 'downstream_comparison.csv')
     df_results.to_csv(csv_file, index=False)
-    
+
     print(f"\n结果已保存到 {results_file} 和 {csv_file}")
-    
+
     return results
