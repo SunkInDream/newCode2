@@ -10,7 +10,7 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from pypots.imputation import SAITS
+
 def process_single_matrix(args):
     idx, x_np, mask_np, causal_matrix, model_params, epochs, lr, gpu_id, evaluate, \
         point_ratio, block_ratio, block_min_w, block_max_w, block_min_h, block_max_h = args
@@ -150,28 +150,56 @@ def process_single_matrix(args):
         mice = IterativeImputer()
         micef = mice.fit_transform(np.where(mask_temp == 1, initial_filled_copy, np.nan))
         metrics['mice'] = ((micef[eval_mask] - true) ** 2).mean()
-
+        
+        from pypots.imputation import TimeMixerPP, TimeLLM, MOMENT
         data_for_pypots = initial_filled_copy.copy()
         data_for_pypots[eval_mask] = np.nan
         data_for_pypots = data_for_pypots[np.newaxis, ...]
         train_set = {"X": data_for_pypots}
-        # 修改后
-        model = SAITS(
+        model = TimeMixerPP(
             n_steps=data_for_pypots.shape[1], 
             n_features=data_for_pypots.shape[2], 
             n_layers=2, 
-            d_model=256,
-            n_heads=4,  # 添加必要参数
-            d_k=64,     # 添加必要参数
-            d_v=64,     # 添加必要参数
-            d_ffn=128,  # 添加必要参数
-            dropout=0.1 # 可选参数，提高稳定性
+            d_model=4,
+            n_heads=4,  
+            top_k=4,       
+            d_ffn=4,  
+            n_kernels=4,
+            dropout=0.1,
         )
                     
         model.fit(train_set)
         imputed_data = model.impute(train_set)
         imputed_data = imputed_data.squeeze(0)
-        metrics['SAITS'] = ((imputed_data[eval_mask] - true) ** 2).mean()
+        metrics['Timemixerpp'] = ((imputed_data[eval_mask] - true) ** 2).mean()
+        
+        data_for_pypots = initial_filled_copy.copy()
+        data_for_pypots[eval_mask] = np.nan
+        data_for_pypots = data_for_pypots[np.newaxis, ...]
+        train_set = {"X": data_for_pypots}
+        model = MOMENT(
+            n_steps=data_for_pypots.shape[1], 
+            n_features=data_for_pypots.shape[2],
+            transformer_backbone="t5-small",
+            transformer_type="encoder_only",
+            head_dropout=0.1,
+            finetuning_mode="linear-probing",
+            revin_affine=False,
+            add_positional_embedding=True,
+            value_embedding_bias=False,
+            orth_gain=0.1,
+            patch_size=4,
+            patch_stride=4,
+            d_ffn=4,
+            d_model=4,
+            n_layers=2, 
+            dropout=0.1,
+        )
+                    
+        model.fit(train_set)
+        imputed_data = model.impute(train_set)
+        imputed_data = imputed_data.squeeze(0)
+        metrics['TimeLLM'] = ((imputed_data[eval_mask] - true) ** 2).mean()
     return idx, initial_filled_copy, metrics
 
 
