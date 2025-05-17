@@ -8,12 +8,13 @@ import pandas as pd
 import multiprocessing
 from sklearn.model_selection import KFold
 from sklearn.metrics import f1_score, roc_auc_score
-from sklearn.impute import KNNImputer
+from sklearn.impute import KNNImputer, SimpleImputer
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from models_dataset import MyDataset
 import warnings
 warnings.filterwarnings("ignore")
+
 class SimpleLSTMClassifier(nn.Module):
     def __init__(self, input_dim, hidden_dim=64):
         super(SimpleLSTMClassifier, self).__init__()
@@ -134,7 +135,7 @@ def evaluate_model(X_train, y_train, X_test, y_test, input_dim, hidden_dim=64, e
     
     return f1, auroc
 
-def evaluate_filling_method(method_name, filled_data, labels, k_folds=5, device='cuda'):
+def evaluate_filling_method(method_name, filled_data, labels, k_folds=4, device='cuda'):
     """使用K折交叉验证评估特定填充方法"""
     print(f"\n评估填充方法: {method_name} 在设备 {device} 上")
     
@@ -144,9 +145,9 @@ def evaluate_filling_method(method_name, filled_data, labels, k_folds=5, device=
         if data is not None and label is not None:
             valid_indices.append(i)
     
-    if len(valid_indices) < 10:  # 样本太少
-        print(f"  警告: 有效样本数量过少 ({len(valid_indices)})")
-        return {'f1': 0, 'auroc': 0}
+    # if len(valid_indices) < 10:  # 样本太少
+    #     print(f"  警告: 有效样本数量过少 ({len(valid_indices)})")
+    #     return {'f1': 0, 'auroc': 0}
     
     X = [filled_data[i] for i in valid_indices]
     y = [labels[i] for i in valid_indices]
@@ -165,18 +166,18 @@ def evaluate_filling_method(method_name, filled_data, labels, k_folds=5, device=
         X_test = [X[i] for i in test_idx]
         y_test = y[test_idx]
         
-        # 如果某一折中只有一种类别，跳过
-        if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
-            print("  警告: 该折中类别不足，跳过")
-            continue
+        # # 如果某一折中只有一种类别，跳过
+        # if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
+        #     print("  警告: 该折中类别不足，跳过")
+        #     continue
         
         input_dim = X[0].shape[1]  # 特征维度
         f1, auroc = evaluate_model(X_train, y_train, X_test, y_test, input_dim, device=device)
         f1_scores.append(f1)
         auroc_scores.append(auroc)
     
-    if not f1_scores:
-        return {'f1': 0, 'auroc': 0}
+    # if not f1_scores:
+    #     return {'f1': 0, 'auroc': 0}
     
     avg_f1 = np.mean(f1_scores)
     avg_auroc = np.mean(auroc_scores)
@@ -187,34 +188,24 @@ def evaluate_filling_method(method_name, filled_data, labels, k_folds=5, device=
 def process_method(args):
     """单个进程内评估填充方法的包装函数"""
     method, data, mask, labels, device, k_folds, return_dict = args
-    
-    try:
-        # 设置GPU环境
-        if device != 'cpu':
-            gpu_id = device.split(':')[1]
-            os.environ['CUDA_VISIBLE_DEVICES'] = gpu_id
-            device = 'cuda:0'  # 重置为0，因为此进程只能看到一个GPU
+    # 设置GPU环境
+    if device != 'cpu':
+        gpu_id = device.split(':')[1]
+        os.environ['CUDA_VISIBLE_DEVICES'] = gpu_id
+        device = 'cuda:0'  # 重置为0，因为此进程只能看到一个GPU
         
-        if method == 'final':
-            # 直接使用final_filled
-            filled_data = data
-        else:
-            # 对每个样本应用填充方法
-            filled_data = []
-            for j in range(len(data)):
-                if data[j] is not None and mask[j] is not None:
-                    filled = fill_with_method(data[j], mask[j], method)
-                    filled_data.append(filled)
-                else:
-                    filled_data.append(None)
+    if method == 'model':
+        # 直接使用final_filled
+        filled_data = data
+    else:
+        # 对每个样本应用填充方法
+        filled_data = []
+        for j in range(len(data)):
+            filled = fill_with_method(data[j], mask[j], method)
+            filled_data.append(filled)
         
-        result = evaluate_filling_method(method, filled_data, labels, k_folds, device)
-        return_dict[method] = result
-    except Exception as e:
-        print(f"方法 {method} 评估失败: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return_dict[method] = {'f1': float('nan'), 'auroc': float('nan')}
+    result = evaluate_filling_method(method, filled_data, labels, k_folds, device)
+    return_dict[method] = result
 
 def evaluate_downstream_methods(dataset):
     """评估不同填充方法对下游分类任务的影响"""
@@ -229,7 +220,7 @@ def evaluate_downstream_methods(dataset):
     # 设置设备和方法
     devices = [f'cuda:{i}' for i in range(torch.cuda.device_count())] or ['cpu']
     print(f"检测到 {len(devices)} 个计算设备")
-    methods = ['zero', 'mean', 'median', 'bfill', 'ffill', 'knn', 'mice', 'final']
+    methods = ['zero', 'mean', 'median', 'bfill', 'ffill', 'knn', 'mice', 'model']
     
     # 并行评估所有方法
     manager = multiprocessing.Manager()
@@ -239,8 +230,8 @@ def evaluate_downstream_methods(dataset):
     # 创建并启动进程
     for i, method in enumerate(methods):
         device = devices[i % len(devices)]
-        data = dataset.final_filled if method == 'final' else dataset.initial_filled
-        mask = None if method == 'final' else dataset.mask_data
+        data = dataset.final_filled
+        mask = dataset.mask_data
         
         p = multiprocessing.Process(
             target=process_method, 

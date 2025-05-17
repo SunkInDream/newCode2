@@ -1,16 +1,12 @@
+import copy 
 import torch
-import torch.nn.functional as F
+import numpy as np
+import pandas as pd
 import torch.optim as optim
 from models_TCN import ADDSTCN
-import pandas as pd
-import numpy as np
-from concurrent.futures import ProcessPoolExecutor
-import os
+import torch.nn.functional as F
 
 def prepare_data(file_or_array):
-    """
-    处理输入数据，支持文件路径或NumPy数组
-    """
     if isinstance(file_or_array, str):
         # 处理文件路径
         df = pd.read_csv(file_or_array)
@@ -36,20 +32,20 @@ def train(x, y, mask, model, optimizer, epochs):
         loss = F.mse_loss(output[mask.unsqueeze(-1)], y[mask.unsqueeze(-1)])
         loss.backward()
         optimizer.step()
-    return model
+    return model, loss
 
 def run_single_task(args):
     target_idx, file, params, device = args
     torch.cuda.set_device(device) if device != 'cpu' else None
 
     x, mask, _ = prepare_data(file)
-    y = x[:, target_idx, :].unsqueeze(1).transpose(1, 2)
+    y = x[:, target_idx, :].unsqueeze(-1)
     x, y, mask = x.to(device), y.to(device), mask.to(device)
 
     model = ADDSTCN(target_idx, x.size(1), params['layers'], params['kernel_size'], cuda=(device != 'cpu'), dilation_c=params['dilation_c']).to(device)
     optimizer = getattr(optim, params['optimizername'])(model.parameters(), lr=params['lr'])
-
-    model = train(x, y, mask[:, target_idx, :], model, optimizer, params['epochs'])
+    model, firstloss = train(x, y, mask[:, target_idx, :], model, optimizer, 1)
+    model, realloss = train(x, y, mask[:, target_idx, :], model, optimizer, params['epochs']-1)
     scores = model.fs_attention.view(-1).detach().cpu().numpy()
     sorted_scores = sorted(scores, reverse=True)
     indices = np.argsort(-scores)
@@ -68,24 +64,28 @@ def run_single_task(args):
                 break
         potentials = indices[:ind+1].tolist()
 
-    validated = []
-    firstloss = F.mse_loss(model(x)[mask[:, target_idx, :].unsqueeze(-1)], y[mask[:, target_idx, :].unsqueeze(-1)]).item()
+    validated = copy.deepcopy(potentials)
 
     for idx in potentials:
         x_perm = x.clone().detach().cpu().numpy()
         np.random.shuffle(x_perm[0, idx, :])
         x_perm = torch.tensor(x_perm).to(device)
-        testloss = F.mse_loss(model(x_perm)[mask[:, target_idx, :].unsqueeze(-1)], y[mask[:, target_idx, :].unsqueeze(-1)]).item()
-        if 0.8 * (firstloss - testloss) <= (firstloss - firstloss) * params['significance']:
-            validated.append(idx)
+        testloss = F.mse_loss(
+            model(x_perm)[mask[:, target_idx, :].unsqueeze(-1)],
+            y[mask[:, target_idx, :].unsqueeze(-1)]
+        ).item()
+        diff = firstloss-realloss
+        testdiff = firstloss-testloss
+
+        if testdiff>(diff * params['significance']):
+             validated.remove(idx) 
 
     return target_idx, validated
 
 def compute_causal_matrix(file_or_array, params, gpu_id=0):
     x, mask, columns = prepare_data(file_or_array)
     num_features = x.shape[1]
-    
-    # 只使用指定 GPU 或 CPU
+
     device = gpu_id if torch.cuda.device_count() > 0 else 'cpu'
 
     # 串行处理各个特征

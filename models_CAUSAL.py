@@ -1,70 +1,30 @@
-import pandas as pd
-import numpy as np
 import os
-import re
-from pathlib import Path
-from sklearn.impute import KNNImputer
 import random
-from statsmodels.tsa.stattools import grangercausalitytests
-import warnings
+import numpy as np
+import pandas as pd
 from models_TCDF import *
-from scipy.spatial.distance import cdist
-from sklearn.cluster import KMeans
-from scipy.fftpack import fft, ifft
-import torch
-from torch.utils.data import Dataset, DataLoader,TensorDataset
-from contextlib import redirect_stdout
-#from models_runTCDF import run_tcdf_analysis
-from sklearn.preprocessing import StandardScaler
-import time
-import glob
-from sklearn.model_selection import KFold
-from sklearn.decomposition import PCA
-from sklearn.cluster import MiniBatchKMeans
-from sklearn.metrics import pairwise_distances
-from scipy.cluster.hierarchy import linkage, fcluster
-from io import StringIO
-import io
-from sklearn.impute import KNNImputer, SimpleImputer
-from sklearn.experimental import enable_iterative_imputer
-from sklearn.impute import IterativeImputer
-from tqdm import tqdm
-from sklearn.model_selection import train_test_split
-import torch.optim as optim
-from sklearn.metrics import accuracy_score, recall_score, precision_score, roc_auc_score, confusion_matrix
-from sklearn.metrics import confusion_matrix, roc_auc_score
-import torch.nn as nn
-import concurrent.futures
-def FirstProcess(file):
+def FirstProcess(file, threshold=0.8):
     df = pd.read_csv(file)
     for column in df.columns:
         col_data = df[column]
         if col_data.isna().all():
-         # 对于全空的列，填充为-1
             df[column] = -1
         else:
-            non_null_data = col_data.dropna()
-            if len(non_null_data) > 0:
-                value_counts = non_null_data.value_counts()
-                if not value_counts.empty:
-                    mode_value = value_counts.index[0]
-                    mode_count = value_counts.iloc[0]
-                    # 使用有效数据数量判断是否超过阈值
-                    if mode_count >= 0.8 * len(non_null_data):
-                        df[column] = col_data.fillna(mode_value)
+            value_counts = col_data.value_counts()
+            mode_value = value_counts.index[0]      #所有出现过的值
+            mode_count = value_counts.iloc[0]       #众数出现的次数
+            if mode_count >= threshold * len(col_data):
+                df[column] = col_data.fillna(mode_value)
     return df
 
-def SecondProcess(file, perturbation_prob=0.1, perturbation_scale=0.1):
-    df_copy = file.copy()
-    
+def SecondProcess(df, perturbation_prob=0.1, perturbation_scale=0.1):
+    df_copy = df.copy()
     for column in df_copy.columns:
         series = df_copy[column]
         missing_mask = series.isna()
 
         if not missing_mask.any():
             continue  # 如果没有缺失值，跳过该列
-
-        # 后面的代码保持不变
         missing_segments = []
         start_idx = None
 
@@ -123,9 +83,9 @@ def SecondProcess(file, perturbation_prob=0.1, perturbation_scale=0.1):
                 df_copy.iloc[start + i, df_copy.columns.get_loc(column)] = value
 
     return df_copy
-def task(args):
-    file, params, gpu = args
-    matrix, columns = compute_causal_matrix(file, params, gpu)
-    print(f"\nResult for {os.path.basename(file)}:")
-    print(np.array(matrix))
-    return matrix   
+# def task(args):
+#     file, params, gpu = args
+#     matrix, columns = compute_causal_matrix(file, params, gpu)
+#     print(f"\nResult for {os.path.basename(file)}:")
+#     print(np.array(matrix))
+#     return matrix   

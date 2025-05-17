@@ -1,20 +1,16 @@
 import os
 import torch
-import torch.nn.functional as F
-from models_TCDF import ADDSTCN
-from concurrent.futures import ProcessPoolExecutor
+import random
 import numpy as np
 import pandas as pd
-import random
-from sklearn.impute import KNNImputer, SimpleImputer
-from sklearn.experimental import enable_iterative_imputer  # noqa
-from sklearn.impute import IterativeImputer
-import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import os
-import torch
+from models_TCDF import ADDSTCN
 import torch.nn.functional as F
-import multiprocessing
+from sklearn.impute import KNNImputer
+from sklearn.experimental import enable_iterative_imputer 
+from sklearn.impute import IterativeImputer
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 def process_single_matrix(args):
     idx, x_np, mask_np, causal_matrix, model_params, epochs, lr, gpu_id, evaluate, \
         point_ratio, block_ratio, block_min_w, block_max_w, block_min_h, block_max_h = args
@@ -24,10 +20,10 @@ def process_single_matrix(args):
         device = 'cuda:0'
     else:
         device = 'cpu'
-    print(f'Processing matrix {idx} on {device}')
+    print(f'Processing matrix {idx} on gpu {gpu_id}...')
 
     seq_len, total_features = x_np.shape
-    filled = x_np.copy()
+    initial_filled = x_np.copy()
 
     # === 填补原始缺失位置 ===
     for target in range(total_features):
@@ -47,7 +43,6 @@ def process_single_matrix(args):
         y = torch.tensor(y_np, dtype=torch.float32).to(device)
         m = torch.tensor(m_np, dtype=torch.float32).to(device)
 
-        # 在process_single_matrix函数中修改模型训练逻辑
         model = ADDSTCN(target, input_size=len(inds),
                             cuda=(device == 'cuda:0'),
                             **model_params).to(device)
@@ -84,7 +79,8 @@ def process_single_matrix(args):
         with torch.no_grad():
             out = model(x).squeeze().cpu().numpy()
             to_fill = np.where(mask_np[:, target] == 0)[0]  # 原始缺失才填补
-            filled[to_fill, target] = out[to_fill]
+            initial_filled_copy = initial_filled.copy()
+            initial_filled[to_fill, target] = out[to_fill]
 
     metrics = {}
     if evaluate:
@@ -119,65 +115,65 @@ def process_single_matrix(args):
                     eval_mask[r, c] = True
             area_removed += len(block)
 
-        # 再填补一次，评估用
-        re_filled = filled.copy()
-        for target in range(total_features):
-            inds = list(np.where(causal_matrix[:, target] == 1)[0])
-            if target not in inds:
-                inds.append(target)
-            else:
-                inds.remove(target)
-                inds.append(target)
-            inds = inds[:3] + [target]
+        # # 再填补一次，评估用
+        # re_filled = filled.copy()
+        # for target in range(total_features):
+        #     inds = list(np.where(causal_matrix[:, target] == 1)[0])
+        #     if target not in inds:
+        #         inds.append(target)
+        #     else:
+        #         inds.remove(target)
+        #         inds.append(target)
+        #     inds = inds[:3] + [target]
 
-            inp = filled[:, inds].T[np.newaxis, ...]
-            y_np = filled[:, target][np.newaxis, :, None]
-            m_np = (mask_temp[:, target] == 1)[np.newaxis, :, None]
+        #     inp = filled[:, inds].T[np.newaxis, ...]
+        #     y_np = filled[:, target][np.newaxis, :, None]
+        #     m_np = (mask_temp[:, target] == 1)[np.newaxis, :, None]
 
-            x = torch.tensor(inp, dtype=torch.float32).to(device)
-            y = torch.tensor(y_np, dtype=torch.float32).to(device)
-            m = torch.tensor(m_np, dtype=torch.float32).to(device)
+        #     x = torch.tensor(inp, dtype=torch.float32).to(device)
+        #     y = torch.tensor(y_np, dtype=torch.float32).to(device)
+        #     m = torch.tensor(m_np, dtype=torch.float32).to(device)
 
-            model = ADDSTCN(target, input_size=len(inds),
-                            cuda=(device == 'cuda:0'),
-                            **model_params).to(device)
-            optim = torch.optim.Adam(model.parameters(), lr=lr)
+        #     model = ADDSTCN(target, input_size=len(inds),
+        #                     cuda=(device == 'cuda:0'),
+        #                     **model_params).to(device)
+        #     optim = torch.optim.Adam(model.parameters(), lr=lr)
 
-            for epoch in range(epochs):
-                model.train()
-                pred = model(x)
-                loss = F.mse_loss(pred * m, y * m)
-                optim.zero_grad()
-                loss.backward()
-                optim.step()
+        #     for epoch in range(epochs):
+        #         model.train()
+        #         pred = model(x)
+        #         loss = F.mse_loss(pred * m, y * m)
+        #         optim.zero_grad()
+        #         loss.backward()
+        #         optim.step()
 
-            model.eval()
-            with torch.no_grad():
-                out = model(x).squeeze().cpu().numpy()
-                to_fill = np.where(mask_temp[:, target] == 0)[0]
-                re_filled[to_fill, target] = out[to_fill]
+        #     model.eval()
+        #     with torch.no_grad():
+        #         out = model(x).squeeze().cpu().numpy()
+        #         to_fill = np.where(mask_temp[:, target] == 0)[0]
+        #         re_filled[to_fill, target] = out[to_fill]
 
         # === 统一评估 ===
-        true = filled[eval_mask]
-        metrics['model'] = ((re_filled[eval_mask] - true) ** 2).mean()
+        true = initial_filled_copy[eval_mask]
+        metrics['model'] = ((initial_filled[eval_mask] - true) ** 2).mean()
 
-        z = filled.copy()
+        z = initial_filled_copy.copy()
         z[mask_temp != 1] = 0
         metrics['zero'] = ((z[eval_mask] - true) ** 2).mean()
 
-        med = np.nanmedian(np.where(mask_temp == 1, filled, np.nan), axis=0)
-        mdf = filled.copy()
+        med = np.nanmedian(np.where(mask_temp == 1, initial_filled_copy, np.nan), axis=0)
+        mdf = initial_filled_copy.copy()
         for j in range(total_features):
             mdf[mask_temp[:, j] != 1, j] = med[j]
         metrics['median'] = ((mdf[eval_mask] - true) ** 2).mean()
 
-        mn = np.nanmean(np.where(mask_temp == 1, filled, np.nan), axis=0)
-        mnf = filled.copy()
+        mn = np.nanmean(np.where(mask_temp == 1, initial_filled_copy, np.nan), axis=0)
+        mnf = initial_filled_copy.copy()
         for j in range(total_features):
             mnf[mask_temp[:, j] != 1, j] = mn[j]
         metrics['mean'] = ((mnf[eval_mask] - true) ** 2).mean()
 
-        df = pd.DataFrame(filled.copy())
+        df = pd.DataFrame(initial_filled_copy.copy())
         df_mask = pd.DataFrame(mask_temp.copy())
         df[df_mask != 1] = np.nan
         bfill = df.bfill().ffill().values
@@ -186,25 +182,22 @@ def process_single_matrix(args):
         metrics['ffill'] = ((ffill[eval_mask] - true) ** 2).mean()
 
         knn = KNNImputer()
-        knnf = knn.fit_transform(np.where(mask_temp == 1, filled, np.nan))
+        knnf = knn.fit_transform(np.where(mask_temp == 1, initial_filled_copy, np.nan))
         metrics['knn'] = ((knnf[eval_mask] - true) ** 2).mean()
 
         mice = IterativeImputer()
-        micef = mice.fit_transform(np.where(mask_temp == 1, filled, np.nan))
+        micef = mice.fit_transform(np.where(mask_temp == 1, initial_filled_copy, np.nan))
         metrics['mice'] = ((micef[eval_mask] - true) ** 2).mean()
 
-    return idx, filled, metrics
+    return idx, initial_filled_copy, metrics
 
 
 def train_all_features_parallel(dataset, model_params, epochs=10, lr=0.001, evaluate=False,
                                point_ratio=0.1, block_ratio=0.2,
                                block_min_w=1, block_max_w=5,
                                block_min_h=1, block_max_h=5):
-
-    print(f"{len(dataset.initial_filled)} {len(dataset.final_filled)}")
-    
-    # 1. 只使用前2张GPU (0和1)，留出第3张GPU不用
-    available_gpus = min(torch.cuda.device_count() - 1, 3)  # 最多使用2张GPU，排除最后一张
+    # 1. 规定使用gpu的个数
+    available_gpus = min(torch.cuda.device_count() - 1, 3)  
     
     # 2. 限制最大进程数
     max_workers = min(available_gpus * 2, 8)  # 每GPU最多2个进程，总共不超过8个
@@ -214,7 +207,6 @@ def train_all_features_parallel(dataset, model_params, epochs=10, lr=0.001, eval
     tasks = []
     for i, mat in enumerate(dataset.initial_filled):
         if mat is not None:
-            # 只使用前available_gpus个GPU
             gpu_id = i % available_gpus if available_gpus > 0 else 'cpu'
             tasks.append((i, mat, dataset.mask_data[i], dataset.total_causal_matrix, 
                       model_params, epochs, lr, gpu_id, evaluate,
@@ -243,23 +235,17 @@ def train_all_features_parallel(dataset, model_params, epochs=10, lr=0.001, eval
                 
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]  # 这是我们提交任务时的原始索引
-                try:
-                    # 获取处理结果 - 忽略返回的索引，直接使用原始索引
-                    _, filled_mat, metrics = future.result()
+                # 获取处理结果 - 忽略返回的索引，直接使用原始索引
+                _, filled_mat, metrics = future.result()
                     
-                    # 直接更新到dataset中的对应位置
-                    if filled_mat is not None:
-                        dataset.final_filled[idx] = filled_mat
-                        print(f"任务 {idx} 完成, 直接更新到final_filled[{idx}]")
+                # 直接更新到dataset中的对应位置
+                if filled_mat is not None:
+                    dataset.final_filled[idx] = filled_mat
+                    print(f"任务 {idx} 完成, 直接更新到final_filled[{idx}]")
                     
-                    # 保存评估结果
-                    if evaluate and metrics:
-                        eval_results.append({**metrics, 'idx': idx})  # 使用原始索引
-                except Exception as e:
-                    print(f"处理任务 {idx} 出错: {str(e)}")
-                    # 详细打印错误栈
-                    import traceback
-                    traceback.print_exc()
+                # 保存评估结果
+                if evaluate and metrics:
+                    eval_results.append({**metrics, 'idx': idx})  # 使用原始索引
 
     # 计算成功更新数量
     updated_count = sum(1 for mat in dataset.final_filled if mat is not None)
