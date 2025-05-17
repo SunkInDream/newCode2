@@ -10,7 +10,7 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ProcessPoolExecutor, as_completed
-
+from pypots.imputation import SAITS
 def process_single_matrix(args):
     idx, x_np, mask_np, causal_matrix, model_params, epochs, lr, gpu_id, evaluate, \
         point_ratio, block_ratio, block_min_w, block_max_w, block_min_h, block_max_h = args
@@ -151,6 +151,27 @@ def process_single_matrix(args):
         micef = mice.fit_transform(np.where(mask_temp == 1, initial_filled_copy, np.nan))
         metrics['mice'] = ((micef[eval_mask] - true) ** 2).mean()
 
+        data_for_pypots = initial_filled_copy.copy()
+        data_for_pypots[eval_mask] = np.nan
+        data_for_pypots = data_for_pypots[np.newaxis, ...]
+        train_set = {"X": data_for_pypots}
+        # 修改后
+        model = SAITS(
+            n_steps=data_for_pypots.shape[1], 
+            n_features=data_for_pypots.shape[2], 
+            n_layers=2, 
+            d_model=256,
+            n_heads=4,  # 添加必要参数
+            d_k=64,     # 添加必要参数
+            d_v=64,     # 添加必要参数
+            d_ffn=128,  # 添加必要参数
+            dropout=0.1 # 可选参数，提高稳定性
+        )
+                    
+        model.fit(train_set)
+        imputed_data = model.impute(train_set)
+        imputed_data = imputed_data.squeeze(0)
+        metrics['SAITS'] = ((imputed_data[eval_mask] - true) ** 2).mean()
     return idx, initial_filled_copy, metrics
 
 
@@ -159,10 +180,10 @@ def train_all_features_parallel(dataset, model_params, epochs=10, lr=0.001, eval
                                block_min_w=1, block_max_w=5,
                                block_min_h=1, block_max_h=5):
     # 1. 规定使用gpu的个数
-    available_gpus = min(torch.cuda.device_count() - 1, 3)  
+    available_gpus = max(min(torch.cuda.device_count() - 1, 3),0) 
     
     # 2. 限制最大进程数
-    max_workers = min(available_gpus * 2, 8)  # 每GPU最多2个进程，总共不超过8个
+    max_workers = max(min(available_gpus * 2, 8),1)  # 每GPU最多2个进程，总共不超过8个
     print(f"使用 {available_gpus} 张GPU，最大 {max_workers} 个进程")
     
     # 3. 准备任务列表

@@ -97,4 +97,4 @@ if __name__ == "__main__":
                                 point_ratio=0.1, block_ratio=0.4,
                                 block_min_w=20, block_max_w=30,
                                 block_min_h=5, block_max_h=10)
-    evaluate_downstream_methods(dataset,k_folds=2)
+    #evaluate_downstream_methods(dataset,k_folds=2)
