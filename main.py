@@ -53,7 +53,7 @@ if __name__ == "__main__":
     print(dataset[0]['file_names'])
     print(dataset[0]['labels'])
      # 1. 执行聚类并获取中心点表示
-    centers = dataset.agregate(20)
+    centers = dataset.agregate(6)
      # 2. 只使用聚类中心的代表文件计算因果矩阵
     center_files = []
     files = [os.path.join(dataset.file_paths, f) for f in os.listdir(dataset.file_paths) if f.endswith('.csv')]
@@ -66,7 +66,6 @@ if __name__ == "__main__":
     
     # 3. 为聚类中心分配GPU资源
     gpus = list(range(torch.cuda.device_count()-1)) or ['cpu']
-    #gpus = ['cpu']
     tasks = [(f, params, gpus[i % len(gpus)]) for i, f in enumerate(center_files)]
     
     with ProcessPoolExecutor(max_workers=len(gpus)) as executor:
@@ -97,4 +96,4 @@ if __name__ == "__main__":
                                 point_ratio=0.1, block_ratio=0.6,
                                 block_min_w=20, block_max_w=30,
                                 block_min_h=5, block_max_h=10)
-    evaluate_downstream_methods(dataset,k_folds=5)
+    #evaluate_downstream_methods(dataset,k_folds=5)

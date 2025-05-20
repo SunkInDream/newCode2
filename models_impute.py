@@ -143,6 +143,7 @@ def process_single_matrix(args):
                 out = model(x).squeeze().cpu().numpy()
                 to_fill = np.where(mask_temp[:, target] == 0)[0]
                 reimpu[to_fill, target] = out[to_fill]
+        eval_mask = (mask_np==1) & (mask_temp==0) 
         ground_truth = ground_truth[eval_mask]
         metrics['model'] = ((reimpu[eval_mask] - ground_truth) ** 2).mean()
 
