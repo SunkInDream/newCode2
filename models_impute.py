@@ -7,6 +7,7 @@ from models_TCDF import ADDSTCN
 import torch.nn.functional as F
 from sklearn.impute import KNNImputer
 from sklearn.experimental import enable_iterative_imputer 
+from sklearn.preprocessing import StandardScaler
 from sklearn.impute import IterativeImputer
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -24,7 +25,7 @@ def process_single_matrix(args):
 
     seq_len, total_features = x_np.shape
     initial_filled = x_np.copy()
-
+    model_cache = {}
     # === 填补原始缺失位置 ===
     for target in range(total_features):
         inds = list(np.where(causal_matrix[:, target] == 1)[0])
@@ -74,6 +75,7 @@ def process_single_matrix(args):
             # 使用最佳模型进行预测
         if best_state:
             model.load_state_dict(best_state)
+            model_cache[target] = best_state
 
         model.eval()
         with torch.no_grad():
@@ -81,6 +83,8 @@ def process_single_matrix(args):
             to_fill = np.where(mask_np[:, target] == 0)[0]  # 原始缺失才填补
             initial_filled_copy = initial_filled.copy()
             initial_filled[to_fill, target] = out[to_fill]
+            ground_truth = initial_filled.copy()
+          
 
     metrics = {}
     if evaluate:
@@ -116,90 +120,108 @@ def process_single_matrix(args):
             area_removed += len(block)
 
         # === 统一评估 ===
-        true = initial_filled_copy[eval_mask]
-        metrics['model'] = ((initial_filled[eval_mask] - true) ** 2).mean()
+        reimpu = initial_filled.copy()
+        for target in range(total_features):
+            inds = list(np.where(causal_matrix[:, target] == 1)[0])
+            if target not in inds:
+                inds.append(target)
+            else:
+                inds.remove(target)
+                inds.append(target)
+            inds = inds[:3] + [target]
+
+            inp = reimpu[:, inds].T[np.newaxis, ...]
+            x = torch.tensor(inp, dtype=torch.float32).to(device)
+
+            model = ADDSTCN(target, input_size=len(inds),
+                            cuda=(device == 'cuda:0'),
+                            **model_params).to(device)
+            model.load_state_dict(model_cache[target])  # ✅ 从内存加载权重
+            model.eval()
+
+            with torch.no_grad():
+                out = model(x).squeeze().cpu().numpy()
+                to_fill = np.where(mask_temp[:, target] == 0)[0]
+                reimpu[to_fill, target] = out[to_fill]
+        ground_truth = ground_truth[eval_mask]
+        metrics['model'] = ((reimpu[eval_mask] - ground_truth) ** 2).mean()
 
         z = initial_filled_copy.copy()
         z[mask_temp != 1] = 0
-        metrics['zero'] = ((z[eval_mask] - true) ** 2).mean()
+        metrics['zero'] = ((z[eval_mask] - ground_truth) ** 2).mean()
 
         med = np.nanmedian(np.where(mask_temp == 1, initial_filled_copy, np.nan), axis=0)
         mdf = initial_filled_copy.copy()
         for j in range(total_features):
             mdf[mask_temp[:, j] != 1, j] = med[j]
-        metrics['median'] = ((mdf[eval_mask] - true) ** 2).mean()
+        metrics['median'] = ((mdf[eval_mask] - ground_truth) ** 2).mean()
 
         mn = np.nanmean(np.where(mask_temp == 1, initial_filled_copy, np.nan), axis=0)
         mnf = initial_filled_copy.copy()
         for j in range(total_features):
             mnf[mask_temp[:, j] != 1, j] = mn[j]
-        metrics['mean'] = ((mnf[eval_mask] - true) ** 2).mean()
+        metrics['mean'] = ((mnf[eval_mask] - ground_truth) ** 2).mean()
 
         df = pd.DataFrame(initial_filled_copy.copy())
         df_mask = pd.DataFrame(mask_temp.copy())
         df[df_mask != 1] = np.nan
         bfill = df.bfill().ffill().values
         ffill = df.ffill().bfill().values
-        metrics['bfill'] = ((bfill[eval_mask] - true) ** 2).mean()
-        metrics['ffill'] = ((ffill[eval_mask] - true) ** 2).mean()
+        metrics['bfill'] = ((bfill[eval_mask] - ground_truth) ** 2).mean()
+        metrics['ffill'] = ((ffill[eval_mask] - ground_truth) ** 2).mean()
 
         knn = KNNImputer()
         knnf = knn.fit_transform(np.where(mask_temp == 1, initial_filled_copy, np.nan))
-        metrics['knn'] = ((knnf[eval_mask] - true) ** 2).mean()
+        metrics['knn'] = ((knnf[eval_mask] - ground_truth) ** 2).mean()
 
         mice = IterativeImputer()
         micef = mice.fit_transform(np.where(mask_temp == 1, initial_filled_copy, np.nan))
-        metrics['mice'] = ((micef[eval_mask] - true) ** 2).mean()
+        metrics['mice'] = ((micef[eval_mask] - ground_truth) ** 2).mean()
         
-        from pypots.imputation import TimeMixerPP, TimeLLM, MOMENT
+        from pypots.imputation import DLinear, TimeLLM, MOMENT
         data_for_pypots = initial_filled_copy.copy()
         data_for_pypots[eval_mask] = np.nan
         data_for_pypots = data_for_pypots[np.newaxis, ...]
         train_set = {"X": data_for_pypots}
-        model = TimeMixerPP(
-            n_steps=data_for_pypots.shape[1], 
-            n_features=data_for_pypots.shape[2], 
-            n_layers=2, 
-            d_model=4,
-            n_heads=4,  
-            top_k=4,       
-            d_ffn=4,  
-            n_kernels=4,
-            dropout=0.1,
-        )
+        model = DLinear(
+                n_steps=data_for_pypots.shape[1], 
+                n_features=data_for_pypots.shape[2], 
+                moving_avg_window_size=5,
+                d_model=32,
+            )
                     
         model.fit(train_set)
         imputed_data = model.impute(train_set)
         imputed_data = imputed_data.squeeze(0)
-        metrics['Timemixerpp'] = ((imputed_data[eval_mask] - true) ** 2).mean()
+        metrics['DLine'] = ((imputed_data[eval_mask] - ground_truth) ** 2).mean()
         
-        data_for_pypots = initial_filled_copy.copy()
-        data_for_pypots[eval_mask] = np.nan
-        data_for_pypots = data_for_pypots[np.newaxis, ...]
-        train_set = {"X": data_for_pypots}
-        model = MOMENT(
-            n_steps=data_for_pypots.shape[1], 
-            n_features=data_for_pypots.shape[2],
-            transformer_backbone="t5-small",
-            transformer_type="encoder_only",
-            head_dropout=0.1,
-            finetuning_mode="linear-probing",
-            revin_affine=False,
-            add_positional_embedding=True,
-            value_embedding_bias=False,
-            orth_gain=0.1,
-            patch_size=4,
-            patch_stride=4,
-            d_ffn=4,
-            d_model=4,
-            n_layers=2, 
-            dropout=0.1,
-        )
+        # data_for_pypots = initial_filled_copy.copy()
+        # data_for_pypots[eval_mask] = np.nan
+        # data_for_pypots = data_for_pypots[np.newaxis, ...]
+        # train_set = {"X": data_for_pypots}
+        # model = MOMENT(
+        #     n_steps=data_for_pypots.shape[1], 
+        #     n_features=data_for_pypots.shape[2],
+        #     transformer_backbone="t5-small",
+        #     transformer_type="encoder_only",
+        #     head_dropout=0.1,
+        #     finetuning_mode="linear-probing",
+        #     revin_affine=False,
+        #     add_positional_embedding=True,
+        #     value_embedding_bias=False,
+        #     orth_gain=0.1,
+        #     patch_size=4,
+        #     patch_stride=4,
+        #     d_ffn=4,
+        #     d_model=4,
+        #     n_layers=2, 
+        #     dropout=0.1,
+        # )
                     
-        model.fit(train_set)
-        imputed_data = model.impute(train_set)
-        imputed_data = imputed_data.squeeze(0)
-        metrics['TimeLLM'] = ((imputed_data[eval_mask] - true) ** 2).mean()
+        # model.fit(train_set)
+        # imputed_data = model.impute(train_set)
+        # imputed_data = imputed_data.squeeze(0)
+        # metrics['TimeLLM'] = ((imputed_data[eval_mask] - true) ** 2).mean()
     return idx, initial_filled_copy, metrics
 
 

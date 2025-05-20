@@ -33,5 +33,5 @@ def copy_files(src_dir: str, dst_dir: str, num_files: int = -1, file_ext: Option
         print(f"已复制: {f}")
 
 # 示例用法
-copy_files("./ICU_Charts", "./data", 4, file_ext=".csv")
+copy_files("./ICU_Charts", "./data", 1000, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")

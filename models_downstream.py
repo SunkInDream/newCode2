@@ -84,6 +84,28 @@ def fill_with_method(data, mask, method):
         mice_imputer = IterativeImputer(max_iter=10, random_state=0, 
                                       skip_complete=True)
         filled = mice_imputer.fit_transform(initial_fill)
+    elif method == 'timemixerpp':
+        from pypots.imputation import TimeMixerPP, TimeLLM, MOMENT
+        data_for_pypots = filled.copy()
+        data_for_pypots[mask == 0] = np.nan
+        data_for_pypots = data_for_pypots[np.newaxis, ...]
+        train_set = {"X": data_for_pypots}
+        model = TimeMixerPP(
+            n_steps=data_for_pypots.shape[1], 
+            n_features=data_for_pypots.shape[2], 
+            n_layers=2, 
+            d_model=4,
+            n_heads=4,  
+            top_k=4,       
+            d_ffn=16,  
+            n_kernels=6,
+            dropout=0.1,
+            epochs=100,
+        )
+                    
+        model.fit(train_set)
+        imputed_data = model.impute(train_set)
+        filled = imputed_data.squeeze(0)
     elif method == 'model':
         process_single_matrix(args)
     
@@ -230,7 +252,7 @@ def evaluate_downstream_methods(dataset, k_folds=4):
     # 设置设备和方法
     devices = [f'cuda:{i}' for i in range(torch.cuda.device_count())] or ['cpu']
     print(f"检测到 {len(devices)} 个计算设备")
-    methods = ['zero', 'mean', 'median', 'bfill', 'ffill', 'knn', 'mice', 'model']
+    methods = ['zero', 'mean', 'median', 'bfill', 'ffill', 'knn', 'mice', 'timemixerpp', 'model']
     
     # 并行评估所有方法
     manager = multiprocessing.Manager()
