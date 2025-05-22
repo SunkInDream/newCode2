@@ -3,6 +3,7 @@ import random
 import numpy as np
 import pandas as pd
 from models_TCDF import *
+
 def FirstProcess(file, threshold=0.8):
     df = pd.read_csv(file)
     for column in df.columns:
@@ -10,12 +11,14 @@ def FirstProcess(file, threshold=0.8):
         if col_data.isna().all():
             df[column] = -1
         else:
-            value_counts = col_data.value_counts()
-            mode_value = value_counts.index[0]      #所有出现过的值
-            mode_count = value_counts.iloc[0]       #众数出现的次数
-            if mode_count >= threshold * len(col_data):
+            non_nan_data = col_data.dropna()
+            value_counts = non_nan_data.value_counts()
+            mode_value = value_counts.index[0]
+            mode_count = value_counts.iloc[0]
+            if mode_count >= threshold * len(non_nan_data):
                 df[column] = col_data.fillna(mode_value)
     return df
+
 
 def SecondProcess(df, perturbation_prob=0.1, perturbation_scale=0.1):
     df_copy = df.copy()

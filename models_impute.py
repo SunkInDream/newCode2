@@ -89,19 +89,17 @@ def process_single_matrix(args):
     metrics = {}
     if evaluate:
         # === 第二步：挖去填补后任意位置，再评估 ===
-        mask_temp = np.ones_like(mask_np)  # 不考虑原始缺失，全部设为1
-        eval_mask = np.zeros_like(mask_np, dtype=bool)
+        eval_mask = np.ones_like(mask_np, dtype=bool)
         rng = np.random.default_rng()
         total_pos = [(i, j) for i in range(seq_len) for j in range(total_features)]
         n_total = len(total_pos)
 
         # 点缺失
-        n_point = max(1, int(n_total * point_ratio))
+        n_point = int(n_total * point_ratio)
         point_remove = rng.choice(n_total, n_point, replace=False)
         for idx in point_remove:
             i, j = total_pos[idx]
-            mask_temp[i, j] = 0
-            eval_mask[i, j] = True
+            eval_mask[i, j] = 0
 
         # 块缺失
         area_removed = 0
@@ -114,9 +112,7 @@ def process_single_matrix(args):
 
             block = [(r, c) for r in range(i, i + h) for c in range(j, j + w)]
             for r, c in block:
-                if mask_temp[r, c] == 1:
-                    mask_temp[r, c] = 0
-                    eval_mask[r, c] = True
+                eval_mask[r, c] = 0
             area_removed += len(block)
 
         # === 统一评估 ===
@@ -141,60 +137,60 @@ def process_single_matrix(args):
 
             with torch.no_grad():
                 out = model(x).squeeze().cpu().numpy()
-                to_fill = np.where(mask_temp[:, target] == 0)[0]
+                to_fill = np.where(eval_mask[:, target] == 0)[0]
                 reimpu[to_fill, target] = out[to_fill]
-        eval_mask = (mask_np==1) & (mask_temp==0) 
-        ground_truth = ground_truth[eval_mask]
-        metrics['model'] = ((reimpu[eval_mask] - ground_truth) ** 2).mean()
+        final_mask = (mask_np==1) & (eval_mask==0) 
+        ground_truth = ground_truth[final_mask]
+        metrics['model'] = ((reimpu[final_mask] - ground_truth) ** 2).mean()
 
         z = initial_filled_copy.copy()
-        z[mask_temp != 1] = 0
-        metrics['zero'] = ((z[eval_mask] - ground_truth) ** 2).mean()
+        z[eval_mask==0] = 0
+        metrics['zero'] = ((z[final_mask] - ground_truth) ** 2).mean()
 
-        med = np.nanmedian(np.where(mask_temp == 1, initial_filled_copy, np.nan), axis=0)
+        med = np.nanmedian(np.where(eval_mask == 1, initial_filled_copy, np.nan), axis=0)
         mdf = initial_filled_copy.copy()
         for j in range(total_features):
-            mdf[mask_temp[:, j] != 1, j] = med[j]
-        metrics['median'] = ((mdf[eval_mask] - ground_truth) ** 2).mean()
+            mdf[eval_mask[:, j] == 0, j] = med[j]
+        metrics['median'] = ((mdf[final_mask] - ground_truth) ** 2).mean()
 
-        mn = np.nanmean(np.where(mask_temp == 1, initial_filled_copy, np.nan), axis=0)
+        mn = np.nanmean(np.where(eval_mask == 1, initial_filled_copy, np.nan), axis=0)
         mnf = initial_filled_copy.copy()
         for j in range(total_features):
-            mnf[mask_temp[:, j] != 1, j] = mn[j]
-        metrics['mean'] = ((mnf[eval_mask] - ground_truth) ** 2).mean()
+            mnf[eval_mask[:, j] == 0, j] = mn[j]
+        metrics['mean'] = ((mnf[final_mask] - ground_truth) ** 2).mean()
 
         df = pd.DataFrame(initial_filled_copy.copy())
-        df_mask = pd.DataFrame(mask_temp.copy())
-        df[df_mask != 1] = np.nan
+        df_mask = pd.DataFrame(eval_mask.copy())
+        df[df_mask == 0] = np.nan
         bfill = df.bfill().ffill().values
         ffill = df.ffill().bfill().values
-        metrics['bfill'] = ((bfill[eval_mask] - ground_truth) ** 2).mean()
-        metrics['ffill'] = ((ffill[eval_mask] - ground_truth) ** 2).mean()
+        metrics['bfill'] = ((bfill[final_mask] - ground_truth) ** 2).mean()
+        metrics['ffill'] = ((ffill[final_mask] - ground_truth) ** 2).mean()
 
         knn = KNNImputer()
-        knnf = knn.fit_transform(np.where(mask_temp == 1, initial_filled_copy, np.nan))
-        metrics['knn'] = ((knnf[eval_mask] - ground_truth) ** 2).mean()
+        knnf = knn.fit_transform(np.where(eval_mask == 1, initial_filled_copy, np.nan))
+        metrics['knn'] = ((knnf[final_mask] - ground_truth) ** 2).mean()
 
         mice = IterativeImputer()
-        micef = mice.fit_transform(np.where(mask_temp == 1, initial_filled_copy, np.nan))
-        metrics['mice'] = ((micef[eval_mask] - ground_truth) ** 2).mean()
+        micef = mice.fit_transform(np.where(eval_mask == 1, initial_filled_copy, np.nan))
+        metrics['mice'] = ((micef[final_mask] - ground_truth) ** 2).mean()
         
-        from pypots.imputation import DLinear, TimeLLM, MOMENT
-        data_for_pypots = initial_filled_copy.copy()
-        data_for_pypots[eval_mask] = np.nan
-        data_for_pypots = data_for_pypots[np.newaxis, ...]
-        train_set = {"X": data_for_pypots}
-        model = DLinear(
-                n_steps=data_for_pypots.shape[1], 
-                n_features=data_for_pypots.shape[2], 
-                moving_avg_window_size=5,
-                d_model=32,
-            )
+        # from pypots.imputation import DLinear, TimeLLM, MOMENT
+        # data_for_pypots = initial_filled_copy.copy()
+        # data_for_pypots[eval_mask] = np.nan
+        # data_for_pypots = data_for_pypots[np.newaxis, ...]
+        # train_set = {"X": data_for_pypots}
+        # model = DLinear(
+        #         n_steps=data_for_pypots.shape[1], 
+        #         n_features=data_for_pypots.shape[2], 
+        #         moving_avg_window_size=5,
+        #         d_model=32,
+        #     )
                     
-        model.fit(train_set)
-        imputed_data = model.impute(train_set)
-        imputed_data = imputed_data.squeeze(0)
-        metrics['DLine'] = ((imputed_data[eval_mask] - ground_truth) ** 2).mean()
+        # model.fit(train_set)
+        # imputed_data = model.impute(train_set)
+        # imputed_data = imputed_data.squeeze(0)
+        # metrics['DLine'] = ((imputed_data[eval_mask] - ground_truth) ** 2).mean()
         
         # data_for_pypots = initial_filled_copy.copy()
         # data_for_pypots[eval_mask] = np.nan
@@ -276,6 +272,7 @@ def train_all_features_parallel(dataset, model_params, epochs=10, lr=0.001, eval
                 if filled_mat is not None:
                     dataset.final_filled[idx] = filled_mat
                     print(f"任务 {idx} 完成, 直接更新到final_filled[{idx}]")
+                    pd.DataFrame(dataset.final_filled[idx]).to_csv(f'./finalIdInitial_{idx}.csv', index=False)
                     
                 # 保存评估结果
                 if evaluate and metrics:

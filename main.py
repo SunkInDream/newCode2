@@ -52,8 +52,10 @@ if __name__ == "__main__":
     print(dataset[0]['initial_filled'])
     print(dataset[0]['file_names'])
     print(dataset[0]['labels'])
+    pd.DataFrame(dataset[0]['initial_filled']).to_csv('./firstIdInitial.csv', index=False)
+    pd.DataFrame(dataset[0]['mask']).to_csv('./firstIdMask.csv', index=False)
      # 1. 执行聚类并获取中心点表示
-    centers = dataset.agregate(6)
+    centers = dataset.agregate(1)
      # 2. 只使用聚类中心的代表文件计算因果矩阵
     center_files = []
     files = [os.path.join(dataset.file_paths, f) for f in os.listdir(dataset.file_paths) if f.endswith('.csv')]
@@ -65,7 +67,7 @@ if __name__ == "__main__":
     print(f"使用{len(dataset.center_repre)}个聚类中心代表进行因果矩阵计算")
     
     # 3. 为聚类中心分配GPU资源
-    gpus = list(range(torch.cuda.device_count()-1)) or ['cpu']
+    gpus = list(range(torch.cuda.device_count())) or ['cpu']
     tasks = [(f, params, gpus[i % len(gpus)]) for i, f in enumerate(center_files)]
     
     with ProcessPoolExecutor(max_workers=len(gpus)) as executor:
