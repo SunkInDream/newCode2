@@ -252,7 +252,7 @@ def evaluate_downstream_methods(dataset, k_folds=4):
     # 设置设备和方法
     devices = [f'cuda:{i}' for i in range(torch.cuda.device_count())] or ['cpu']
     print(f"检测到 {len(devices)} 个计算设备")
-    methods = ['zero', 'mean', 'median', 'bfill', 'ffill', 'knn', 'mice', 'timemixerpp', 'model']
+    methods = ['zero', 'mean', 'median', 'bfill', 'ffill', 'knn', 'mice', 'DLine', 'model']
     
     # 并行评估所有方法
     manager = multiprocessing.Manager()

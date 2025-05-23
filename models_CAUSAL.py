@@ -86,9 +86,3 @@ def SecondProcess(df, perturbation_prob=0.1, perturbation_scale=0.1):
                 df_copy.iloc[start + i, df_copy.columns.get_loc(column)] = value
 
     return df_copy
-# def task(args):
-#     file, params, gpu = args
-#     matrix, columns = compute_causal_matrix(file, params, gpu)
-#     print(f"\nResult for {os.path.basename(file)}:")
-#     print(np.array(matrix))
-#     return matrix   
