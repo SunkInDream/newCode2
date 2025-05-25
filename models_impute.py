@@ -139,45 +139,49 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
         top3_matrix = new_matrix
         return top3_matrix
 def mse_evaluate(mx, causal_matrix):
+    # (旧版代码省略)
+    # mx: 原始 2D 数组，shape=(T, features)
     ground_truth = mx.copy()
-    mx = np.expand_dims(mx, axis=0)
-    X_with_block_missing_data = block_missing(mx, factor=0.1, block_width=3, block_len=3)
-    X_with_block_missing_data = np.squeeze(X_with_block_missing_data, axis=0)
-    my_model = impute(X_with_block_missing_data, causal_matrix=causal_matrix,
-                      model_params = {
-                        'num_levels': 6,
-                        'kernel_size': 6,
-                        'dilation_c': 4,
-                        },
-                      epochs=100, lr=0.01, gpu_id=None)
-    zero_imp_res   = zero_impu(X_with_block_missing_data)
-    mean_imp_res   = meam_impu(X_with_block_missing_data)
-    median_imp_res = median_impu(X_with_block_missing_data)
-    mode_imp_res   = mode_impu(X_with_block_missing_data)
-    random_imp_res = random_impu(X_with_block_missing_data)
-    knn_imp_res    = knn_impu(X_with_block_missing_data)
-    ffill_imp_res  = ffill_impu(X_with_block_missing_data)
-    bfill_imp_res  = bfill_impu(X_with_block_missing_data)
 
-    my_model_mse    = ((my_model      - ground_truth) ** 2).mean()
-    zero_impu_mse   = ((zero_imp_res  - ground_truth) ** 2).mean()
-    mean_impu_mse   = ((mean_imp_res  - ground_truth) ** 2).mean()
-    median_impu_mse = ((median_imp_res- ground_truth) ** 2).mean()
-    mode_impu_mse   = ((mode_imp_res  - ground_truth) ** 2).mean()
-    random_impu_mse = ((random_imp_res- ground_truth) ** 2).mean()
-    knn_impu_mse    = ((knn_imp_res   - ground_truth) ** 2).mean()
-    ffill_impu_mse  = ((ffill_imp_res - ground_truth) ** 2).mean()
-    bfill_impu_mse  = ((bfill_imp_res - ground_truth) ** 2).mean()
+    # 1) 模拟缺失：block_missing 要求 3D 输入
+    X_block_3d = block_missing(
+        np.expand_dims(mx, axis=0),  # (1, T, F)
+        factor=0.1, block_width=3, block_len=3
+    )
+    # 2) 去掉 batch 维度，回到 2D
+    X_block = X_block_3d[0]         # (T, F) 带 NaN
+
+    # 3) 模型插补
+    imputed = impute(
+        X_block, causal_matrix,
+        model_params={'num_levels': 6, 'kernel_size': 6, 'dilation_c': 4},
+        epochs=100, lr=0.01, gpu_id=None
+    )
+
+    # 4) 各基线方法插补
+    zero_res   = zero_impu(X_block)
+    mean_res   = mean_impu(X_block)
+    median_res = median_impu(X_block)
+    mode_res   = mode_impu(X_block)
+    random_res = random_impu(X_block)
+    knn_res    = knn_impu(X_block)
+    ffill_res  = ffill_impu(X_block)
+    bfill_res  = bfill_impu(X_block)
+
+    # 5) 定义 MSE 计算，全部在 2D 上
+    def mse(a, b):
+        return np.mean((a - b) ** 2)
+
     return {
-        'my_model': my_model_mse,
-        'zero_impu': zero_impu_mse,
-        'mean_impu': mean_impu_mse,
-        'median_impu': median_impu_mse,
-        'mode_impu': mode_impu_mse,
-        'random_impu': random_impu_mse,
-        'knn_impu': knn_impu_mse,
-        'ffill_impu': ffill_impu_mse,
-        'bfill_impu': bfill_impu_mse
+        'my_model':    mse(imputed,      ground_truth),
+        'zero_impu':   mse(zero_res,     ground_truth),
+        'mean_impu':   mse(mean_res,     ground_truth),
+        'median_impu': mse(median_res,   ground_truth),
+        'mode_impu':   mse(mode_res,     ground_truth),
+        'random_impu': mse(random_res,   ground_truth),
+        'knn_impu':    mse(knn_res,      ground_truth),
+        'ffill_impu':  mse(ffill_res,    ground_truth),
+        'bfill_impu':  mse(bfill_res,    ground_truth),
     }
     
 

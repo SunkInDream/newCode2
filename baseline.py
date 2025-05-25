@@ -2,10 +2,53 @@ import numpy as np
 import pandas as pd
 def zero_impu(mx):
    return np.nan_to_num(mx, nan=0)
-def meam_impu(mx):
-   return np.nan_to_num(mx, nan=np.nanmean(mx, axis=0, keepdims=True))
+def mean_impu(mx):
+    mx = mx.copy()
+    original_shape = mx.shape  # 保存原始维度
+    
+    # 按列计算均值
+    col_mean = np.nanmean(mx, axis=0)
+    all_nan_cols = np.isnan(col_mean)
+    col_mean[all_nan_cols] = 0
+    
+    # 明确处理每一列
+    for col in range(mx.shape[1]):
+        nan_mask = np.isnan(mx[:, col])
+        if np.any(nan_mask):
+            mx[nan_mask, col] = col_mean[col]
+    
+    # 确保所有NaN都已处理
+    if np.isnan(mx).any():
+        mx = np.nan_to_num(mx, nan=0)
+    
+    # 确保维度没变
+    assert mx.shape == original_shape, "填充后维度变化!"
+    
+    return mx
+
 def median_impu(mx):
-   return np.nan_to_num(mx, nan=np.nanmedian(mx, axis=0, keepdims=True))
+    mx = mx.copy()
+    original_shape = mx.shape  # 保存原始维度
+    
+    # 按列计算均值
+    col_median = np.nanmedian(mx, axis=0)
+    all_nan_cols = np.isnan(col_median)
+    col_median[all_nan_cols] = 0
+    
+    # 明确处理每一列
+    for col in range(mx.shape[1]):
+        nan_mask = np.isnan(mx[:, col])
+        if np.any(nan_mask):
+            mx[nan_mask, col] = col_median[col]
+    
+    # 确保所有NaN都已处理
+    if np.isnan(mx).any():
+        mx = np.nan_to_num(mx, nan=0)
+    
+    # 确保维度没变
+    assert mx.shape == original_shape, "填充后维度变化!"
+    
+    return mx
 def mode_impu(mx):
     df = pd.DataFrame(mx)
     for column in df.columns:
@@ -14,12 +57,10 @@ def mode_impu(mx):
             df[column] = -1
         else:
             non_nan_data = col_data.dropna()
-            value_counts = non_nan_data.value_counts()
-            mode_value = value_counts.index[0]
-            mode_count = value_counts.iloc[0]
-            if mode_count >= 0.8 * len(non_nan_data):
-                df[column] = col_data.fillna(mode_value)
+            mode_value = non_nan_data.mode().iloc[0]  # 更直接取众数
+            df[column] = col_data.fillna(mode_value)
     return df.values
+
 def random_impu(mx):
     df = pd.DataFrame(mx)
     for column in df.columns:
@@ -35,6 +76,8 @@ def random_impu(mx):
 def knn_impu(mx, k=5):
     from sklearn.impute import KNNImputer
     imputer = KNNImputer(n_neighbors=k)
+    all_nan_cols = np.all(np.isnan(mx), axis=0)
+    mx[:, all_nan_cols] = -1
     return imputer.fit_transform(mx)
 def ffill_impu(mx):
     df = pd.DataFrame(mx)
