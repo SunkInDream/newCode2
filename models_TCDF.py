@@ -97,5 +97,5 @@ def compute_causal_matrix(file_or_array, params, gpu_id=0):
     for tgt, causes in results:
         for c in causes:
             matrix[tgt, c] = 1
-    return matrix, columns
+    return matrix
 

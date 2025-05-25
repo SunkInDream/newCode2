@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 from models_TCDF import *
 
-def FirstProcess(file, threshold=0.8):
-    df = pd.read_csv(file)
+def FirstProcess(matrix, threshold=0.8):
+    df = pd.DataFrame(matrix)
     for column in df.columns:
         col_data = df[column]
         if col_data.isna().all():
@@ -86,3 +86,10 @@ def SecondProcess(df, perturbation_prob=0.1, perturbation_scale=0.1):
                 df_copy.iloc[start + i, df_copy.columns.get_loc(column)] = value
 
     return df_copy
+
+def initial_process(matrix, threshold=0.8, perturbation_prob=0.1, perturbation_scale=0.1):
+    df = pd.DataFrame(matrix)
+    df = FirstProcess(df, threshold)
+    df = SecondProcess(df, perturbation_prob, perturbation_scale)
+    return df.values.astype(np.float32)
+

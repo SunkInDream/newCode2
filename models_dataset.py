@@ -6,7 +6,7 @@ from sklearn.cluster import KMeans
 from torch.utils.data import Dataset
 
 class MyDataset(Dataset):
-    def __init__(self, file_paths, tag_file=None, tag_name=None, id_name=None): 
+    def __init__(self, file_paths, eval_mse=False, eval_down=False, tag_file=None, tag_name=None, id_name=None): 
         self.file_paths = file_paths  
         self.file_names = []             # 文件名列表
         self.original_data = []          # 含nan的原始数据 (list of ndarray)
@@ -24,7 +24,7 @@ class MyDataset(Dataset):
             df = pd.read_csv(file)
             data = df.values.astype(np.float32)
             self.original_data.append(data)
-            first_prepro_data =  FirstProcess(file)
+            first_prepro_data =  FirstProcess(data)
             mask = (~first_prepro_data.isna()).values.astype(np.float32)
             self.mask_data.append(mask)
             second_prepro_data = SecondProcess(first_prepro_data)

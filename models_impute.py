@@ -11,6 +11,176 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.impute import IterativeImputer
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pygrinder import (
+    mcar,
+    mar_logistic,
+    mnar_x,
+    mnar_t,
+    mnar_nonuniform,
+    rdo,
+    seq_missing,
+    block_missing,
+    calc_missing_rate
+)
+from sklearn.cluster import KMeans
+from models_CAUSAL import *
+from models_TCDF import *
+from baseline import *
+def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=None):
+    if gpu_id is not None and torch.cuda.is_available():
+        device = torch.device(f'cuda:{gpu_id}')
+    else:
+        device = torch.device('cpu')
+    mask = (~np.isnan(original)).astype(int)
+    initial_filled = initial_process(original)
+    sequence_len, total_features = initial_filled.shape
+    for target in range(total_features):
+        inds = list(np.where(causal_matrix[:, target] == 1)[0])
+        if target not in inds:
+            inds.append(target)
+        else:
+            inds.remove(target)
+            inds.append(target)
+        inds = inds[:3] + [target]
+
+        inp = initial_filled[:, inds].T[np.newaxis, ...]
+        y_np = initial_filled[:, target][np.newaxis, :, None]
+        m_np = (mask[:, target] == 1)[np.newaxis, :, None]
+
+        x = torch.tensor(inp, dtype=torch.float32).to(device)
+        y = torch.tensor(y_np, dtype=torch.float32).to(device)
+        m = torch.tensor(m_np, dtype=torch.float32).to(device)
+
+        model = ADDSTCN(target, input_size=len(inds),
+                            cuda=(device == 'cuda:0'),
+                            **model_params).to(device)
+            # 使用更适合时间序列的学习率调度
+        optim = torch.optim.Adam(model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optim, mode='min', factor=0.5, patience=5, verbose=False)
+            
+        best_loss = float('inf')
+        best_state = None
+        final_filled = initial_filled.copy()
+        for epoch in range(epochs):
+            model.train()
+            pred = model(x)
+            loss = F.mse_loss(pred * m, y * m) + 0.001 * sum(p.abs().sum() for p in model.parameters())
+            optim.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optim.step()
+            scheduler.step(loss)
+                
+                # 保存最佳模型
+            if loss.item() < best_loss:
+                best_loss = loss.item()
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            
+            # 使用最佳模型进行预测
+        if best_state:
+            model.load_state_dict(best_state)
+        model.eval()
+        with torch.no_grad():
+            out = model(x).squeeze().cpu().numpy()
+            to_fill = np.where(mask[:, target] == 0)[0]  # 原始缺失才填补
+            final_filled[to_fill, target] = out[to_fill]
+    return final_filled
+def agregate(initial_filled, n_cluster):
+        data = np.array([np.nanmean(x, axis=0) for x in initial_filled])
+        km = KMeans(n_clusters=n_cluster, n_init=10, random_state=0)
+        labels = km.fit_predict(data)
+        idx_arr = []    
+        for k in range(n_cluster):
+            idxs = np.where(labels == k)[0]
+            if len(idxs) == 0: 
+                continue
+            cluster_data = data[idxs]
+            dists = np.linalg.norm(cluster_data - km.cluster_centers_[k], axis=1)
+            best_idx = idxs[np.argmin(dists)]
+            idx_arr.append(int(best_idx))
+        return idx_arr
+def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standard_cg=None, params = {
+                                            'layers': 6,
+                                            'kernel_size': 6,
+                                            'dilation_c': 4,
+                                            'optimizername': 'Adam',
+                                            'lr': 0.02,
+                                            'epochs': 100,
+                                            'significance': 1.2,
+                                        }):
+    if isStandard:
+        if standard_cg is None:
+            raise ValueError("standard_cg must be provided when isStandard is True")
+        else:
+            return standard_cg
+    else:
+        initial_matrix_arr = original_matrix_arr.copy()
+        for i in range(len(initial_matrix_arr)):
+            initial_matrix_arr[i] = initial_process(initial_matrix_arr[i])
+        idx_arr = agregate(initial_matrix_arr, n_cluster)
+        cg_total = None
+        columns = None
+        for idx, i in enumerate(idx_arr):
+            matrix = compute_causal_matrix(initial_matrix_arr[i], params=params, gpu_id=0)            # 第一次迭代时初始化cg_total
+            if cg_total is None:
+                cg_total = matrix.copy()
+            else:
+                cg_total += matrix
+        np.fill_diagonal(cg_total, 0)
+        new_matrix = np.zeros_like(cg_total)
+        for col in range(cg_total.shape[1]):
+            temp_col = cg_total[:, col].copy()
+            if np.count_nonzero(temp_col) < 3:
+                new_matrix[:, col] = 1
+            else:
+                top3 = np.argsort(temp_col)[-3:]
+                new_matrix[top3, col] = 1
+        top3_matrix = new_matrix
+        return top3_matrix
+def mse_evaluate(mx, causal_matrix):
+    ground_truth = mx.copy()
+    mx = np.expand_dims(mx, axis=0)
+    X_with_block_missing_data = block_missing(mx, factor=0.1, block_width=3, block_len=3)
+    X_with_block_missing_data = np.squeeze(X_with_block_missing_data, axis=0)
+    my_model = impute(X_with_block_missing_data, causal_matrix=causal_matrix,
+                      model_params = {
+                        'num_levels': 6,
+                        'kernel_size': 6,
+                        'dilation_c': 4,
+                        },
+                      epochs=100, lr=0.01, gpu_id=None)
+    zero_imp_res   = zero_impu(X_with_block_missing_data)
+    mean_imp_res   = meam_impu(X_with_block_missing_data)
+    median_imp_res = median_impu(X_with_block_missing_data)
+    mode_imp_res   = mode_impu(X_with_block_missing_data)
+    random_imp_res = random_impu(X_with_block_missing_data)
+    knn_imp_res    = knn_impu(X_with_block_missing_data)
+    ffill_imp_res  = ffill_impu(X_with_block_missing_data)
+    bfill_imp_res  = bfill_impu(X_with_block_missing_data)
+
+    my_model_mse    = ((my_model      - ground_truth) ** 2).mean()
+    zero_impu_mse   = ((zero_imp_res  - ground_truth) ** 2).mean()
+    mean_impu_mse   = ((mean_imp_res  - ground_truth) ** 2).mean()
+    median_impu_mse = ((median_imp_res- ground_truth) ** 2).mean()
+    mode_impu_mse   = ((mode_imp_res  - ground_truth) ** 2).mean()
+    random_impu_mse = ((random_imp_res- ground_truth) ** 2).mean()
+    knn_impu_mse    = ((knn_imp_res   - ground_truth) ** 2).mean()
+    ffill_impu_mse  = ((ffill_imp_res - ground_truth) ** 2).mean()
+    bfill_impu_mse  = ((bfill_imp_res - ground_truth) ** 2).mean()
+    return {
+        'my_model': my_model_mse,
+        'zero_impu': zero_impu_mse,
+        'mean_impu': mean_impu_mse,
+        'median_impu': median_impu_mse,
+        'mode_impu': mode_impu_mse,
+        'random_impu': random_impu_mse,
+        'knn_impu': knn_impu_mse,
+        'ffill_impu': ffill_impu_mse,
+        'bfill_impu': bfill_impu_mse
+    }
+    
+
 
 def process_single_matrix(args):
     idx, x_np, mask_np, causal_matrix, model_params, epochs, lr, gpu_id, evaluate, \
@@ -272,7 +442,7 @@ def train_all_features_parallel(dataset, model_params, epochs=10, lr=0.001, eval
                 if filled_mat is not None:
                     dataset.final_filled[idx] = filled_mat
                     print(f"任务 {idx} 完成, 直接更新到final_filled[{idx}]")
-                    pd.DataFrame(dataset.final_filled[idx]).to_csv(f'./finalIdInitial_{idx}.csv', index=False)
+                    #pd.DataFrame(dataset.final_filled[idx]).to_csv(f'./finalIdInitial_{idx}.csv', index=False)
                     
                 # 保存评估结果
                 if evaluate and metrics:
