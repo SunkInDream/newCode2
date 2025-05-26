@@ -72,8 +72,8 @@ def train_and_evaluate(data_arr, label_arr, k=5, epochs=100, lr=0.01):
         val_loader = DataLoader(Subset(dataset, val_idx), batch_size=16)
         
         # 初始化模型
-        model = SimpleLSTMClassifier(input_dim=4)
-        criterion = nn.BCELoss()
+        model = SimpleLSTMClassifier(input_dim=data_arr[0].shape[1])
+        criterion = nn.BCEWithLogitsLoss()
         optimizer = optim.Adam(model.parameters(), lr=lr)
         
         # 🔁 训练 5 个 epoch

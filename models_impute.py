@@ -184,7 +184,35 @@ def mse_evaluate(mx, causal_matrix):
         'bfill_impu':  mse(bfill_res,    ground_truth),
     }
     
+import os, torch
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
+from models_impute import impute
 
+def _impute_worker(mx, causal_matrix, model_params, gpu_id):
+    # 每个子进程里只看到一张卡 cuda:0
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    torch.cuda.set_device(0)
+    return impute(mx, causal_matrix=causal_matrix, model_params=model_params)
+
+def parallel_impute(data_list, causal_matrix, model_params):
+    """把 data_list 中每个矩阵分配给所有 GPU 并行 impute；返回与 data_list 等长的结果列表"""
+    n_gpus = torch.cuda.device_count()
+    if n_gpus == 0:
+        # no GPU，退化到串行
+        return [impute(mx, causal_matrix=causal_matrix, model_params=model_params) for mx in data_list]
+
+    ctx = get_context("spawn")
+    results = [None] * len(data_list)
+    with ProcessPoolExecutor(max_workers=n_gpus, mp_context=ctx) as exe:
+        futures = {
+            exe.submit(_impute_worker, mx, causal_matrix, model_params, idx % n_gpus): idx
+            for idx, mx in enumerate(data_list)
+        }
+        for fut in as_completed(futures):
+            i = futures[fut]
+            results[i] = fut.result()
+    return results
 
 def process_single_matrix(args):
     idx, x_np, mask_np, causal_matrix, model_params, epochs, lr, gpu_id, evaluate, \
