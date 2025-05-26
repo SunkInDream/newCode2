@@ -12,6 +12,9 @@ from sklearn.impute import KNNImputer, SimpleImputer
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from models_dataset import *
+from torch.utils.data import Dataset, DataLoader, Subset
+import torch.nn as nn
+import torch.optim as optim
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -28,6 +31,91 @@ class SimpleLSTMClassifier(nn.Module):
         last_hidden = lstm_out[:, -1, :]  # 取最后时刻的隐藏状态
         out = self.fc(last_hidden)
         return self.sigmoid(out)
+
+class MatrixDataset(Dataset):
+    def __init__(self, matrices, labels):
+        self.matrices = matrices  # list of [seq_len, input_dim] tensors or arrays
+        self.labels = labels      # list of 0/1
+
+    def __len__(self):
+        return len(self.matrices)
+
+    def __getitem__(self, idx):
+        x = torch.tensor(self.matrices[idx], dtype=torch.float32)  # [seq_len, input_dim]
+        y = torch.tensor(self.labels[idx], dtype=torch.float32)    # scalar
+        return x, y
+
+def prepare_data(data_dir, label_file, id_name, label_name):
+    data_arr = []
+    label_arr = []
+    label_df = pd.read_csv(label_file)  
+    for file_name in os.listdir(data_dir):
+        file_path = os.path.join(data_dir, file_name)
+        this_np = pd.read_csv(file_path).to_numpy()
+        data_arr.append(this_np)
+        file_id = file_name[:-4]  
+        label_df[id_name] = [str(i) for i in label_df[id_name]]
+        matched_row = label_df[label_df[id_name] == file_id]
+        label = matched_row[label_name].values[0]
+        label_arr.append(label)
+    return data_arr, label_arr
+        
+        
+def train_and_evaluate(data_arr, label_arr, k=5, epochs=100, lr=0.01):
+    dataset = MatrixDataset(data_arr, label_arr)
+    kf = KFold(n_splits=k, shuffle=True, random_state=42)
+    for fold, (train_idx, val_idx) in enumerate(kf.split(dataset)):
+        print(f"\n=== Fold {fold + 1}/{k} ===")
+        
+        # 用 Subset 拆出 train 和 val 数据集
+        train_loader = DataLoader(Subset(dataset, train_idx), batch_size=16, shuffle=True)
+        val_loader = DataLoader(Subset(dataset, val_idx), batch_size=16)
+        
+        # 初始化模型
+        model = SimpleLSTMClassifier(input_dim=4)
+        criterion = nn.BCELoss()
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        
+        # 🔁 训练 5 个 epoch
+        for epoch in range(epochs):
+            model.train()
+            for x, y in train_loader:
+                y = y.unsqueeze(1)
+                output = model(x)
+                loss = criterion(output, y)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        # ✅ 验证
+        model.eval()
+        correct = total = 0
+        with torch.no_grad():
+            for x, y in val_loader:
+                y = y.unsqueeze(1)
+                preds = (model(x) > 0.5).float()
+                correct += (preds == y).sum().item()
+                total += y.size(0)
+        print(f"Fold {fold+1} Accuracy: {correct / total:.2%}")
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def preprocess_input(x_np):
