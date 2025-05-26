@@ -126,9 +126,9 @@ def generate_and_save_lorenz_datasets(num_datasets, p, T, output_dir, seed_start
     
     return datasets
 # 示例用法
-#copy_files("./ICU_Charts", "./data", 20, file_ext=".csv")
+copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")
 
 
 # 使用示例
-generate_and_save_lorenz_datasets(num_datasets=10, p=10, T=30, output_dir="./data")
+#generate_and_save_lorenz_datasets(num_datasets=10, p=10, T=30, output_dir="./data")
