@@ -45,20 +45,28 @@ class MatrixDataset(Dataset):
         y = torch.tensor(self.labels[idx], dtype=torch.float32)    # scalar
         return x, y
 
-def prepare_data(data_dir, label_file, id_name, label_name):
-    data_arr = []
-    label_arr = []
-    label_df = pd.read_csv(label_file)  
-    for file_name in os.listdir(data_dir):
-        file_path = os.path.join(data_dir, file_name)
-        this_np = pd.read_csv(file_path).to_numpy()
-        data_arr.append(this_np)
-        file_id = file_name[:-4]  
-        label_df[id_name] = [str(i) for i in label_df[id_name]]
-        matched_row = label_df[label_df[id_name] == file_id]
-        label = matched_row[label_name].values[0]
-        label_arr.append(label)
-    return data_arr, label_arr
+def prepare_data(data_dir, label_file=None, id_name=None, label_name=None):
+    if label_file is None or id_name is None or label_name is None:
+        data_arr = []
+        for file_name in os.listdir(data_dir):
+            file_path = os.path.join(data_dir, file_name)
+            this_np = pd.read_csv(file_path).to_numpy()
+            data_arr.append(this_np)
+        return data_arr
+    else:
+        data_arr = []
+        label_arr = []
+        label_df = pd.read_csv(label_file)  
+        for file_name in os.listdir(data_dir):
+            file_path = os.path.join(data_dir, file_name)
+            this_np = pd.read_csv(file_path).to_numpy()
+            data_arr.append(this_np)
+            file_id = file_name[:-4]  
+            label_df[id_name] = [str(i) for i in label_df[id_name]]
+            matched_row = label_df[label_df[id_name] == file_id]
+            label = matched_row[label_name].values[0]
+            label_arr.append(label)
+        return data_arr, label_arr
         
         
 def train_and_evaluate(data_arr, label_arr, k=5, epochs=100, lr=0.01):

@@ -3,6 +3,7 @@ import torch
 import random
 import numpy as np
 import pandas as pd
+import multiprocessing as mp 
 from models_TCDF import ADDSTCN
 import torch.nn.functional as F
 from sklearn.impute import KNNImputer
@@ -86,6 +87,61 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=No
             to_fill = np.where(mask[:, target] == 0)[0]  # 原始缺失才填补
             final_filled[to_fill, target] = out[to_fill]
     return final_filled
+
+def impute_worker(task_queue, causal_matrix, result_queue, model_params, epochs, lr, gpu_id):
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    torch.cuda.set_device(0)
+
+    while True:
+        item = task_queue.get()
+        if item is None:
+            break
+        file_path = item
+        try:
+            filename = os.path.basename(file_path)
+            data = pd.read_csv(file_path).values.astype(np.float32)
+
+            result = impute(data, causal_matrix, model_params, epochs=epochs, lr=lr, gpu_id=0)
+            result_queue.put((filename, result))  # ⬅ 将结果返回，而不是保存文件
+        except Exception as e:
+            result_queue.put((file_path, None))  # 标记失败
+
+
+def parallel_impute_folder(causal_matrix, input_dir,  model_params, epochs=100, lr=0.01):
+    num_gpus = torch.cuda.device_count()
+    file_list = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith(".csv")]
+
+    task_queue = mp.Queue()
+    result_queue = mp.Queue()
+
+    for file_path in file_list:
+        task_queue.put(file_path)
+
+    for _ in range(num_gpus):
+        task_queue.put(None)
+
+    workers = []
+    for gpu_id in range(num_gpus):
+        p = mp.Process(target=impute_worker, args=(
+            task_queue, causal_matrix, result_queue, model_params, epochs, lr, gpu_id
+        ))
+        p.start()
+        workers.append(p)
+
+    results = []
+    for _ in range(len(file_list)):
+        filename, result = result_queue.get()
+        if result is not None:
+            results.append(result)
+        else:
+            print(f"[错误] {filename} 填补失败")
+
+    for p in workers:
+        p.join()
+
+    return results  # ⬅ 返回结果列表
+
+
 def agregate(initial_filled, n_cluster):
         data = np.array([np.nanmean(x, axis=0) for x in initial_filled])
         km = KMeans(n_clusters=n_cluster, n_init=10, random_state=0)
@@ -100,89 +156,214 @@ def agregate(initial_filled, n_cluster):
             best_idx = idxs[np.argmin(dists)]
             idx_arr.append(int(best_idx))
         return idx_arr
-def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standard_cg=None, params = {
-                                            'layers': 6,
-                                            'kernel_size': 6,
-                                            'dilation_c': 4,
-                                            'optimizername': 'Adam',
-                                            'lr': 0.02,
-                                            'epochs': 100,
-                                            'significance': 1.2,
-                                        }):
+def causal_worker(task_queue, result_queue, initial_matrix_arr, params, gpu_id):
+    """
+    每个进程运行的 worker，绑定指定 GPU，处理 task_queue 中的任务
+    """
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    torch.cuda.set_device(0)  # 每个子进程看的是 CUDA_VISIBLE_DEVICES 下的 cuda:0
+
+    while True:
+        item = task_queue.get()
+        if item is None:
+            break
+        task_id, i = item
+        try:
+            matrix = compute_causal_matrix(initial_matrix_arr[i], params=params, gpu_id=0)
+            result_queue.put((task_id, matrix))
+        except Exception as e:
+            print(f"[GPU {gpu_id}] 任务 {task_id} 失败: {e}")
+            result_queue.put((task_id, None))
+
+
+def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standard_cg=None,
+                     params={
+                         'layers': 6,
+                         'kernel_size': 6,
+                         'dilation_c': 4,
+                         'optimizername': 'Adam',
+                         'lr': 0.02,
+                         'epochs': 100,
+                         'significance': 1.2,
+                     }):
+
     if isStandard:
         if standard_cg is None:
             raise ValueError("standard_cg must be provided when isStandard is True")
         else:
             return standard_cg
-    else:
-        initial_matrix_arr = original_matrix_arr.copy()
-        for i in range(len(initial_matrix_arr)):
-            initial_matrix_arr[i] = initial_process(initial_matrix_arr[i])
-        idx_arr = agregate(initial_matrix_arr, n_cluster)
-        cg_total = None
-        columns = None
-        for idx, i in enumerate(idx_arr):
-            matrix = compute_causal_matrix(initial_matrix_arr[i], params=params, gpu_id=0)            # 第一次迭代时初始化cg_total
-            if cg_total is None:
-                cg_total = matrix.copy()
-            else:
-                cg_total += matrix
-        np.fill_diagonal(cg_total, 0)
-        new_matrix = np.zeros_like(cg_total)
-        for col in range(cg_total.shape[1]):
-            temp_col = cg_total[:, col].copy()
-            if np.count_nonzero(temp_col) < 3:
-                new_matrix[:, col] = 1
-            else:
-                top3 = np.argsort(temp_col)[-3:]
-                new_matrix[top3, col] = 1
-        top3_matrix = new_matrix
-        return top3_matrix
-def mse_evaluate(mx, causal_matrix):
-    # (旧版代码省略)
-    # mx: 原始 2D 数组，shape=(T, features)
+
+    # Step 1: 预处理数据
+    initial_matrix_arr = original_matrix_arr.copy()
+    for i in range(len(initial_matrix_arr)):
+        initial_matrix_arr[i] = initial_process(initial_matrix_arr[i])
+
+    # Step 2: 聚类并获取每组索引
+    idx_arr = agregate(initial_matrix_arr, n_cluster)
+
+    # Step 3: 多 GPU 并行计算 causal_matrix
+    num_gpus = torch.cuda.device_count()
+    task_queue = mp.Queue()
+    result_queue = mp.Queue()
+
+    for task_id, i in enumerate(idx_arr):
+        task_queue.put((task_id, i))
+
+    for _ in range(num_gpus):
+        task_queue.put(None)
+
+    workers = []
+    for gpu_id in range(num_gpus):
+        p = mp.Process(target=causal_worker, args=(task_queue, result_queue, initial_matrix_arr, params, gpu_id))
+        p.start()
+        workers.append(p)
+
+    results = [None] * len(idx_arr)
+    for _ in range(len(idx_arr)):
+        task_id, matrix = result_queue.get()
+        results[task_id] = matrix
+
+    for p in workers:
+        p.join()
+
+    # Step 4: 合并结果
+    cg_total = None
+    for matrix in results:
+        if matrix is None:
+            continue
+        if cg_total is None:
+            cg_total = matrix.copy()
+        else:
+            cg_total += matrix
+
+    if cg_total is None:
+        raise RuntimeError("所有任务都失败，未能得到有效的因果矩阵")
+
+    # Step 5: 选 top3 作为 final causal graph
+    np.fill_diagonal(cg_total, 0)
+    new_matrix = np.zeros_like(cg_total)
+    for col in range(cg_total.shape[1]):
+        temp_col = cg_total[:, col].copy()
+        if np.count_nonzero(temp_col) < 3:
+            new_matrix[:, col] = 1
+        else:
+            top3 = np.argsort(temp_col)[-3:]
+            new_matrix[top3, col] = 1
+
+    return new_matrix
+def mse_evaluate(mx, causal_matrix, gpu_id=None):
     ground_truth = mx.copy()
+    X_block_3d = block_missing(mx[np.newaxis, ...], factor=0.1, block_width=3, block_len=3)
+    X_block = X_block_3d[0]
 
-    # 1) 模拟缺失：block_missing 要求 3D 输入
-    X_block_3d = block_missing(
-        np.expand_dims(mx, axis=0),  # (1, T, F)
-        factor=0.1, block_width=3, block_len=3
-    )
-    # 2) 去掉 batch 维度，回到 2D
-    X_block = X_block_3d[0]         # (T, F) 带 NaN
-
-    # 3) 模型插补
     imputed = impute(
         X_block, causal_matrix,
         model_params={'num_levels': 6, 'kernel_size': 6, 'dilation_c': 4},
-        epochs=100, lr=0.01, gpu_id=None
+        epochs=100, lr=0.01, gpu_id=gpu_id
     )
 
-    # 4) 各基线方法插补
-    zero_res   = zero_impu(X_block)
-    mean_res   = mean_impu(X_block)
-    median_res = median_impu(X_block)
-    mode_res   = mode_impu(X_block)
-    random_res = random_impu(X_block)
-    knn_res    = knn_impu(X_block)
-    ffill_res  = ffill_impu(X_block)
-    bfill_res  = bfill_impu(X_block)
-
-    # 5) 定义 MSE 计算，全部在 2D 上
     def mse(a, b):
         return np.mean((a - b) ** 2)
 
     return {
         'my_model':    mse(imputed,      ground_truth),
-        'zero_impu':   mse(zero_res,     ground_truth),
-        'mean_impu':   mse(mean_res,     ground_truth),
-        'median_impu': mse(median_res,   ground_truth),
-        'mode_impu':   mse(mode_res,     ground_truth),
-        'random_impu': mse(random_res,   ground_truth),
-        'knn_impu':    mse(knn_res,      ground_truth),
-        'ffill_impu':  mse(ffill_res,    ground_truth),
-        'bfill_impu':  mse(bfill_res,    ground_truth),
+        'zero_impu':   mse(zero_impu(X_block), ground_truth),
+        'mean_impu':   mse(mean_impu(X_block), ground_truth),
+        'median_impu': mse(median_impu(X_block), ground_truth),
+        'mode_impu':   mse(mode_impu(X_block), ground_truth),
+        'random_impu': mse(random_impu(X_block), ground_truth),
+        'knn_impu':    mse(knn_impu(X_block), ground_truth),
+        'ffill_impu':  mse(ffill_impu(X_block), ground_truth),
+        'bfill_impu':  mse(bfill_impu(X_block), ground_truth),
     }
+
+def mse_worker(task_queue, result_queue, causal_matrix, gpu_id):
+    # 设置环境变量，限制此进程只能看到一个GPU
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    
+    print(f"Worker启动，物理GPU ID={gpu_id}，可见设备={os.environ['CUDA_VISIBLE_DEVICES']}")
+    
+    while True:
+        item = task_queue.get()
+        if item is None:
+            break
+        
+        idx, item_data = item
+        try:
+            # 检查并正确提取矩阵数据
+            if isinstance(item_data, tuple) and len(item_data) > 1:
+                # 如果是(filename, matrix)格式
+                filename, matrix = item_data
+                print(f"[Worker GPU {gpu_id}] 任务{idx}: 处理文件 {filename}")
+            else:
+                # 直接就是矩阵
+                matrix = item_data
+            
+            # 确保matrix是正确的二维numpy数组
+            if not isinstance(matrix, np.ndarray):
+                raise TypeError(f"期望numpy数组，得到{type(matrix)}")
+            
+            if matrix.ndim != 2:
+                raise ValueError(f"期望二维矩阵，得到{matrix.ndim}维")
+            
+            # 传入二维矩阵，mse_evaluate内部会转成三维
+            result = mse_evaluate(matrix, causal_matrix, gpu_id=0)
+            result_queue.put((idx, result))
+            print(f"[Worker GPU {gpu_id}] 完成任务 {idx}")
+        except Exception as e:
+            import traceback
+            print(f"[Worker GPU {gpu_id}] 评估任务 {idx} 失败: {e}")
+            print(traceback.format_exc())
+            result_queue.put((idx, None))
+
+def parallel_mse_evaluate(res_list, causal_matrix):
+    num_gpus = torch.cuda.device_count()
+    print(f"发现 {num_gpus} 个GPU设备")
+    
+    # 没有GPU就单线程运行
+    if num_gpus == 0:
+        results = []
+        for i, (fname, matrix) in enumerate(res_list):
+            try:
+                result = mse_evaluate(matrix, causal_matrix)
+                results.append(result)
+            except Exception as e:
+                print(f"评估任务 {i} 失败: {e}")
+                results.append(None)
+        return results
+    
+    task_queue = mp.Queue()
+    result_queue = mp.Queue()
+    
+    # 加入任务，传入元组
+    for idx, item in enumerate(res_list):
+        task_queue.put((idx, item))
+    
+    # 结束标记
+    for _ in range(num_gpus):
+        task_queue.put(None)
+    
+    # 创建工作进程
+    workers = []
+    for gpu_id in range(num_gpus):
+        p = mp.Process(target=mse_worker, args=(task_queue, result_queue, causal_matrix, gpu_id))
+        p.start()
+        workers.append(p)
+    
+    # 收集结果
+    results = [None] * len(res_list)
+    for _ in range(len(res_list)):
+        try:
+            idx, result = result_queue.get()
+            results[idx] = result
+        except Exception as e:
+            print(f"获取结果时出错: {e}")
+    
+    # 等待所有进程结束
+    for p in workers:
+        p.join()
+    
+    return results
     
 import os, torch
 from concurrent.futures import ProcessPoolExecutor, as_completed
