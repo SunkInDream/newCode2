@@ -125,10 +125,59 @@ def generate_and_save_lorenz_datasets(num_datasets, p, T, output_dir, seed_start
     save_lorenz_datasets_to_csv(datasets, output_dir)
     
     return datasets
+import os
+import shutil
+import pandas as pd
+from tqdm import tqdm
+
+def extract_balanced_samples(
+    source_dir: str,
+    label_file: str,
+    id_name: str,
+    label_name: str,
+    target_dir: str,
+    num_pos: int,
+    num_neg: int,
+    random_state: int = 42
+) -> None:
+    os.makedirs(target_dir, exist_ok=True)
+
+    labels = pd.read_csv(label_file)
+    labels[id_name] = labels[id_name].astype(str)
+
+    # 只保留源目录中实际存在的文件
+    labels['filepath'] = labels[id_name].apply(
+        lambda x: os.path.join(source_dir, f"{x}.csv")
+    )
+    labels = labels[labels['filepath'].apply(os.path.isfile)]
+
+    pos_df = labels[labels[label_name] == 1]
+    neg_df = labels[labels[label_name] == 0]
+    if len(pos_df) < num_pos or len(neg_df) < num_neg:
+        raise ValueError(f"可用正样本 {len(pos_df)}, 负样本 {len(neg_df)} 不足要求")
+
+    pos_sel = pos_df.sample(n=num_pos, random_state=random_state)
+    neg_sel = neg_df.sample(n=num_neg, random_state=random_state)
+    selected = pd.concat([pos_sel, neg_sel], ignore_index=True)
+
+    for _, row in tqdm(selected.iterrows(), total=len(selected), desc="拷贝样本"):
+        src = row['filepath']
+        dst = os.path.join(target_dir, os.path.basename(src))
+        shutil.copy2(src, dst)
 # 示例用法
-copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
+#copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")
 
 
 # 使用示例
 #generate_and_save_lorenz_datasets(num_datasets=10, p=10, T=30, output_dir="./data")
+extract_balanced_samples(
+    source_dir = "./ICU_Charts/",
+    label_file = "./static_tag.csv",
+    id_name = "ICUSTAY_ID",
+    label_name = "DIEINHOSPITAL",
+    target_dir = "./data/",
+    num_pos = 100,
+    num_neg = 100,
+    random_state = 42
+)
