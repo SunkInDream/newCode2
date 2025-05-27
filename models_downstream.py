@@ -6,6 +6,7 @@ import torch
 import numpy as np
 import pandas as pd
 import multiprocessing
+from tqdm import tqdm
 from sklearn.model_selection import KFold
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score, precision_score, recall_score
 from sklearn.impute import KNNImputer, SimpleImputer
@@ -46,9 +47,11 @@ class MatrixDataset(Dataset):
         return x, y
 
 def prepare_data(data_dir, label_file=None, id_name=None, label_name=None):
+    file_list = os.listdir(data_dir)
+
     if label_file is None or id_name is None or label_name is None:
         data_arr = []
-        for file_name in os.listdir(data_dir):
+        for file_name in tqdm(file_list, desc="读取数据文件"):  # ✅ 加进度条
             file_path = os.path.join(data_dir, file_name)
             this_np = pd.read_csv(file_path).to_numpy()
             data_arr.append(this_np)
@@ -56,33 +59,39 @@ def prepare_data(data_dir, label_file=None, id_name=None, label_name=None):
     else:
         data_arr = []
         label_arr = []
-        label_df = pd.read_csv(label_file)  
-        for file_name in os.listdir(data_dir):
+        label_df = pd.read_csv(label_file)
+        label_df[id_name] = [str(i) for i in label_df[id_name]]
+
+        for file_name in tqdm(file_list, desc="读取数据并匹配标签"):  # ✅ 加进度条
             file_path = os.path.join(data_dir, file_name)
             this_np = pd.read_csv(file_path).to_numpy()
             data_arr.append(this_np)
-            file_id = file_name[:-4]  
-            label_df[id_name] = [str(i) for i in label_df[id_name]]
+
+            file_id = file_name[:-4]
             matched_row = label_df[label_df[id_name] == file_id]
             label = matched_row[label_name].values[0]
             label_arr.append(label)
+
         return data_arr, label_arr
         
-def train_and_evaluate(data_arr, label_arr, k=5, epochs=100, lr=0.02): 
-    dataset = MatrixDataset(data_arr, label_arr) 
-    kf = KFold(n_splits=k, shuffle=True, random_state=42) 
-    for fold, (train_idx, val_idx) in enumerate(kf.split(dataset)): 
-        print(f"\n=== Fold {fold + 1}/{k} ===") 
-        
+def train_and_evaluate(data_arr, label_arr, k=5, epochs=100, lr=0.02):
+    dataset = MatrixDataset(data_arr, label_arr)
+    kf = KFold(n_splits=k, shuffle=True, random_state=42)
+
+    accs, precs, recs, f1s, aurocs = [], [], [], [], []
+
+    for fold, (train_idx, val_idx) in enumerate(kf.split(dataset)):
+        print(f"\n=== Fold {fold + 1}/{k} ===")
+
         train_loader = DataLoader(Subset(dataset, train_idx), batch_size=16, shuffle=True)
-        val_loader   = DataLoader(Subset(dataset, val_idx),   batch_size=16)
-        
+        val_loader   = DataLoader(Subset(dataset, val_idx), batch_size=16)
+
         model = SimpleLSTMClassifier(input_dim=data_arr[0].shape[1])
         criterion = nn.BCEWithLogitsLoss()
         optimizer = optim.Adam(model.parameters(), lr=lr)
-        
-        # —— 训练
-        for epoch in range(epochs):
+
+        # ✅ 用 tqdm 包裹 epoch 循环，加进度条
+        for epoch in tqdm(range(epochs), desc=f"Training Fold {fold+1}"):
             model.train()
             for x, y in train_loader:
                 y = y.unsqueeze(1).float()
@@ -92,33 +101,41 @@ def train_and_evaluate(data_arr, label_arr, k=5, epochs=100, lr=0.02):
                 loss.backward()
                 optimizer.step()
 
-        # —— 验证
+        # 验证
         model.eval()
-        all_labels = []
-        all_preds  = []
-        all_scores = []  # 存放 sigmoid(logits) 作为 AUROC 分数
+        all_labels, all_preds, all_scores = [], [], []
         with torch.no_grad():
             for x, y in val_loader:
                 y = y.unsqueeze(1).float()
                 logits = model(x)
                 probs = torch.sigmoid(logits)
-
                 preds = (probs > 0.5).float()
 
                 all_labels.extend(y.cpu().numpy())
                 all_preds.extend(preds.cpu().numpy())
                 all_scores.extend(probs.cpu().numpy())
 
-        # 统一计算各项指标
         acc   = accuracy_score(all_labels, all_preds)
         prec  = precision_score(all_labels, all_preds, zero_division=0)
         rec   = recall_score(all_labels, all_preds, zero_division=0)
         f1    = f1_score(all_labels, all_preds, zero_division=0)
         auroc = roc_auc_score(all_labels, all_scores)
 
-        print(f"Fold {fold+1} — Accuracy: {acc:.2%}, Precision: {prec:.2%}, Recall: {rec:.2%}, "
-              f"F1: {f1:.2%}, AUROC: {auroc:.4f}")
-        
+        print(f"Fold {fold+1} — Accuracy: {acc:.2%}, Precision: {prec:.2%}, "
+              f"Recall: {rec:.2%}, F1: {f1:.2%}, AUROC: {auroc:.4f}")
+
+        accs.append(acc)
+        precs.append(prec)
+        recs.append(rec)
+        f1s.append(f1)
+        aurocs.append(auroc)
+
+    print("\n=== Average over folds ===")
+    print(f"Accuracy: {np.mean(accs):.2%} ± {np.std(accs):.2%}")
+    print(f"Precision: {np.mean(precs):.2%} ± {np.std(precs):.2%}")
+    print(f"Recall: {np.mean(recs):.2%} ± {np.std(recs):.2%}")
+    print(f"F1: {np.mean(f1s):.2%} ± {np.std(f1s):.2%}")
+    print(f"AUROC: {np.mean(aurocs):.4f} ± {np.std(aurocs):.4f}")
 
 
 

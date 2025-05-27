@@ -2,6 +2,7 @@ import os
 import torch
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 import multiprocessing as mp 
 from models_TCDF import ADDSTCN
 import torch.nn.functional as F
@@ -98,7 +99,7 @@ def impute_worker(task_queue, causal_matrix, result_queue, model_params, epochs,
             result_queue.put((filename, result))  # ⬅ 将结果返回，而不是保存文件
         except Exception as e:
             result_queue.put((file_path, None))  # 标记失败
-def parallel_impute_folder(causal_matrix, input_dir,  model_params, epochs=100, lr=0.01):
+def parallel_impute_folder(causal_matrix, input_dir, model_params, epochs=100, lr=0.01):
     num_gpus = torch.cuda.device_count()
     file_list = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith(".csv")]
 
@@ -120,7 +121,9 @@ def parallel_impute_folder(causal_matrix, input_dir,  model_params, epochs=100, 
         workers.append(p)
 
     results = []
-    for _ in range(len(file_list)):
+
+    # ✅ 加进度条：每个任务完成后更新一次
+    for _ in tqdm(range(len(file_list)), desc="批量填补中"):
         filename, result = result_queue.get()
         if result is not None:
             results.append(result)
@@ -130,23 +133,29 @@ def parallel_impute_folder(causal_matrix, input_dir,  model_params, epochs=100, 
     for p in workers:
         p.join()
 
-    return results  # ⬅ 返回结果列表
+    return results
 
 
 def agregate(initial_filled, n_cluster):
-        data = np.array([np.nanmean(x, axis=0) for x in initial_filled])
-        km = KMeans(n_clusters=n_cluster, n_init=10, random_state=0)
-        labels = km.fit_predict(data)
-        idx_arr = []    
-        for k in range(n_cluster):
-            idxs = np.where(labels == k)[0]
-            if len(idxs) == 0: 
-                continue
-            cluster_data = data[idxs]
-            dists = np.linalg.norm(cluster_data - km.cluster_centers_[k], axis=1)
-            best_idx = idxs[np.argmin(dists)]
-            idx_arr.append(int(best_idx))
-        return idx_arr
+    # Step 1: 每个样本按列取均值，构造聚类输入
+    data = np.array([np.nanmean(x, axis=0) for x in initial_filled])
+
+    # Step 2: KMeans 聚类
+    km = KMeans(n_clusters=n_cluster, n_init=10, random_state=0)
+    labels = km.fit_predict(data)
+
+    # Step 3: 逐类找代表样本，带进度条
+    idx_arr = []
+    for k in tqdm(range(n_cluster), desc="选择每簇代表样本"):
+        idxs = np.where(labels == k)[0]
+        if len(idxs) == 0:
+            continue
+        cluster_data = data[idxs]
+        dists = np.linalg.norm(cluster_data - km.cluster_centers_[k], axis=1)
+        best_idx = idxs[np.argmin(dists)]
+        idx_arr.append(int(best_idx))
+
+    return idx_arr
 def causal_worker(task_queue, result_queue, initial_matrix_arr, params, gpu_id):
     """
     每个进程运行的 worker，绑定指定 GPU，处理 task_queue 中的任务
@@ -186,7 +195,7 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
 
     # Step 1: 预处理数据
     initial_matrix_arr = original_matrix_arr.copy()
-    for i in range(len(initial_matrix_arr)):
+    for i in tqdm(range(len(initial_matrix_arr)), desc="预处理样本"):
         initial_matrix_arr[i] = initial_process(initial_matrix_arr[i])
 
     # Step 2: 聚类并获取每组索引
@@ -199,7 +208,6 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
 
     for task_id, i in enumerate(idx_arr):
         task_queue.put((task_id, i))
-
     for _ in range(num_gpus):
         task_queue.put(None)
 
@@ -210,7 +218,9 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
         workers.append(p)
 
     results = [None] * len(idx_arr)
-    for _ in range(len(idx_arr)):
+
+    # ✅ 用 tqdm 包裹 result_queue.get() 获取进度条
+    for _ in tqdm(range(len(idx_arr)), desc="因果发现中"):
         task_id, matrix = result_queue.get()
         results[task_id] = matrix
 
@@ -355,7 +365,6 @@ def parallel_mse_evaluate(res_list, causal_matrix):
         p.join()
     
     return results
-
 def parellel_mse_compare(res, cg):
     print(f"共 {len(res)} 个矩阵，开始批量 MSE 评估…")
     mse_dicts = parallel_mse_evaluate(res, causal_matrix=cg)
@@ -364,14 +373,16 @@ def parellel_mse_compare(res, cg):
         print("错误: 所有MSE评估任务均失败!")
     else:
         print(f"成功完成 {len(valid_mse_dicts)}/{len(mse_dicts)} 个MSE评估")
-        # 计算平均MSE
+        
+        # ✅ 进度条加在每个方法的平均 MSE 计算上
         avg_mse = {}
-        for method in valid_mse_dicts[0]:
+        for method in tqdm(valid_mse_dicts[0], desc="计算平均 MSE"):
             vals = [d[method] for d in valid_mse_dicts if d is not None]
             if vals:
                 avg_mse[method] = sum(vals) / len(vals)
             else:
                 avg_mse[method] = float('nan')
+        
         print("各方法平均 MSE:")
         for method, v in sorted(avg_mse.items()):
             print(f"{method:12s}: {v:.6f}")
