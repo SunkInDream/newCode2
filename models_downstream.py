@@ -20,7 +20,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class SimpleLSTMClassifier(nn.Module):
-    def __init__(self, input_dim, hidden_dim=64):
+    def __init__(self, input_dim, hidden_dim=32):
         super(SimpleLSTMClassifier, self).__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
         self.fc = nn.Linear(hidden_dim, 1)
@@ -31,7 +31,7 @@ class SimpleLSTMClassifier(nn.Module):
         lstm_out, _ = self.lstm(x)
         last_hidden = lstm_out[:, -1, :]  # 取最后时刻的隐藏状态
         out = self.fc(last_hidden)
-        return self.sigmoid(out)
+        return out
 
 class MatrixDataset(Dataset):
     def __init__(self, matrices, labels):
@@ -100,6 +100,7 @@ def train_and_evaluate(data_arr, label_arr, k=5, epochs=100, lr=0.02):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
 
         # 验证
         model.eval()
@@ -136,6 +137,13 @@ def train_and_evaluate(data_arr, label_arr, k=5, epochs=100, lr=0.02):
     print(f"Recall: {np.mean(recs):.2%} ± {np.std(recs):.2%}")
     print(f"F1: {np.mean(f1s):.2%} ± {np.std(f1s):.2%}")
     print(f"AUROC: {np.mean(aurocs):.4f} ± {np.std(aurocs):.4f}")
+    return {
+        'Accuracy': (np.mean(accs), np.std(accs)),
+        'Precision': (np.mean(precs), np.std(precs)),
+        'Recall': (np.mean(recs), np.std(recs)),
+        'F1': (np.mean(f1s), np.std(f1s)),
+        'AUROC': (np.mean(aurocs), np.std(aurocs)),
+    }
 
 
 
