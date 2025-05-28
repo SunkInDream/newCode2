@@ -164,6 +164,28 @@ def extract_balanced_samples(
         src = row['filepath']
         dst = os.path.join(target_dir, os.path.basename(src))
         shutil.copy2(src, dst)
+        import numpy as np
+import pandas as pd
+
+def generate_sparse_matrix(rows=50, cols=50, ones_per_col=3):
+    # 创建全0矩阵
+    matrix = np.zeros((rows, cols), dtype=int)
+    
+    # 每列随机放置3个1
+    for col in range(cols):
+        # 随机选择该列中的3个位置
+        random_rows = np.random.choice(rows, ones_per_col, replace=False)
+        # 在选中的位置设置为1
+        matrix[random_rows, col] = 1
+    
+    # 创建DataFrame并保存为CSV
+    df = pd.DataFrame(matrix)
+    df.to_csv('sparse_matrix_50x50.csv', index=False, header=False)
+    
+    return "已生成 sparse_matrix_50x50.csv"
+
+# 执行函数
+generate_sparse_matrix(50, 50, 3)
 # 示例用法
 #copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")
@@ -171,13 +193,13 @@ def extract_balanced_samples(
 
 # 使用示例
 #generate_and_save_lorenz_datasets(num_datasets=10, p=10, T=30, output_dir="./data")
-extract_balanced_samples(
-    source_dir = "./ICU_Charts/",
-    label_file = "./static_tag.csv",
-    id_name = "ICUSTAY_ID",
-    label_name = "DIEINHOSPITAL",
-    target_dir = "./data/",
-    num_pos = 100,
-    num_neg = 100,
-    random_state = 42
-)
+# extract_balanced_samples(
+#     source_dir = "./ICU_Charts/",
+#     label_file = "./static_tag.csv",
+#     id_name = "ICUSTAY_ID",
+#     label_name = "DIEINHOSPITAL",
+#     target_dir = "./data/",
+#     num_pos = 100,
+#     num_neg = 100,
+#     random_state = 42
+# )

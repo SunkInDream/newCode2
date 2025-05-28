@@ -29,6 +29,7 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=No
     mask = (~np.isnan(original)).astype(int)
     initial_filled = initial_process(original)
     sequence_len, total_features = initial_filled.shape
+    final_filled = initial_filled.copy()
     for target in range(total_features):
         inds = list(np.where(causal_matrix[:, target] == 1)[0])
         if target not in inds:
@@ -56,7 +57,7 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=No
             
         best_loss = float('inf')
         best_state = None
-        final_filled = initial_filled.copy()
+        
         for epoch in range(epochs):
             model.train()
             pred = model(x)
@@ -78,8 +79,13 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=No
         model.eval()
         with torch.no_grad():
             out = model(x).squeeze().cpu().numpy()
-            to_fill = np.where(mask[:, target] == 0)[0]  # 原始缺失才填补
+            # pd.DataFrame(out).to_csv(f"imputed_target_{target}.csv")
+            # print(out)
+            # pd.DataFrame(mask).to_csv(f"mask_target_{target}.csv")
+            to_fill = np.where(mask[:, target] == 0) # 原始缺失才填补
+            #print(f"Target {target} 填补完成，填补位置: {to_fill[0]}")
             final_filled[to_fill, target] = out[to_fill]
+        #pd.DataFrame(final_filled).to_csv(f"imputed_target_{target}.csv")
     return final_filled
 
 def impute_worker(task_queue, causal_matrix, result_queue, model_params, epochs, lr, gpu_id):
