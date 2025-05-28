@@ -1,101 +1,70 @@
-import os
-import sys
-from concurrent.futures import ProcessPoolExecutor
-from models_dataset import *
-from models_CAUSAL import *
-from models_TCDF import *
 from models_impute import *
 from models_downstream import *
-import numpy as np
-import multiprocessing
-import warnings
-from models_dataset import *  # Ensure MyDataset is imported
-def task(args):
-    file, params, gpu = args
-    
-    # 添加处理NumPy数组的代码
-    if isinstance(file, np.ndarray):
-        file_name = f"array_data_{id(file)}"  # 为数组创建唯一标识符
-    else:
-        file_name = os.path.basename(file)
-        
-    if gpu != 'cpu':
-        # 设置环境变量限制可见GPU
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
-        # 在环境变量设置后，子进程中的GPU编号总是从0开始
-        device = 'cuda:0'  
-    else:
-        os.environ['CUDA_VISIBLE_DEVICES'] = ''
-        device = 'cpu'
-        
-    # 将正确映射后的device传递给函数，而不是原始gpu编号
-    matrix, columns = compute_causal_matrix(file, params, device)
-    print(f"\nResult for {file_name}: 使用设备 {device}")
-    print(np.array(matrix))
-    return matrix
-params = {
-    'layers': 6,
-    'kernel_size': 6,
-    'dilation_c': 4,
-    'optimizername': 'Adam',
-    'lr': 0.02,
-    'epochs': 150,
-    'significance': 0.8,
-}
-if __name__ == "__main__":
-    warnings.filterwarnings("ignore", category=UserWarning, module="joblib")
-    multiprocessing.set_start_method('spawn', force=True)
-    dataset = MyDataset('./data', tag_file='./static_tag.csv', tag_name='DIEINHOSPITAL', id_name='ICUSTAY_ID')
-    print(len(dataset))
-    print(dataset[0]['original'])
-    print(dataset[0]['mask'])
-    print(dataset[0]['initial_filled'])
-    print(dataset[0]['file_names'])
-    print(dataset[0]['labels'])
-    # pd.DataFrame(dataset[0]['initial_filled']).to_csv('./firstIdInitial.csv', index=False)
-    # pd.DataFrame(dataset[0]['mask']).to_csv('./firstIdMask.csv', index=False)
-     # 1. 执行聚类并获取中心点表示
-    centers = dataset.agregate(4)
-     # 2. 只使用聚类中心的代表文件计算因果矩阵
-    center_files = []
-    files = [os.path.join(dataset.file_paths, f) for f in os.listdir(dataset.file_paths) if f.endswith('.csv')]
-    
-    for idx in dataset.center_repre:
-        if isinstance(idx, (int, np.integer)) and 0 <= idx < len(files):
-            center_files.append(files[idx])
-    
-    print(f"使用{len(dataset.center_repre)}个聚类中心代表进行因果矩阵计算")
-    
-    # 3. 为聚类中心分配GPU资源
-    gpus = list(range(torch.cuda.device_count())) or ['cpu']
-    tasks = [(f, params, gpus[i % len(gpus)]) for i, f in enumerate(center_files)]
-    
-    with ProcessPoolExecutor(max_workers=len(gpus)) as executor:
-        results = list(executor.map(task, tasks))
-    
-    if results:
-        total_matrix = np.zeros_like(results[0])
-        for matrix in results:
-            total_matrix += matrix
-        mat = total_matrix.copy()
-        new_matrix = np.zeros_like(mat)
-
-        for col in range(mat.shape[1]):
-            temp_col = mat[:, col].copy()
-            temp_col[col] = 0  # 忽略对角线
-            if np.count_nonzero(temp_col) < 3:
-                new_matrix[:, col] = 1
-            else:
-                top3 = np.argsort(temp_col)[-3:]
-                new_matrix[top3, col] = 1
-        dataset.total_causal_matrix = new_matrix
-    model_params = {
-    'num_levels': 6,
-    'kernel_size': 6,
-    'dilation_c': 4,
+from baseline import *
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+model_params = {
+        'num_levels': 8,
+        'kernel_size': 6,
+        'dilation_c': 2
     }
-    train_all_features_parallel(dataset, model_params, epochs=150, lr=0.02, evaluate=True,
-                                point_ratio=0.1, block_ratio=0.6,
-                                block_min_w=2, block_max_w=4,
-                                block_min_h=5, block_max_h=10)
-    #evaluate_downstream_methods(dataset,k_folds=5)
+if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    data_arr = prepare_data('./data/')
+    cg = causal_discovery(data_arr, 20)
+    # res = parallel_impute_folder(cg, './data', model_params, epochs=100, lr=0.02)
+    # parellel_mse_compare(res, cg)
+    
+    
+    data_arr1, label_arr1 = prepare_data('./data/', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
+    data_arr2 = parallel_impute_folder(cg, './data', model_params, epochs=150, lr=0.02)
+    accs = train_and_evaluate(data_arr2, label_arr1, k=3, epochs=150, lr=0.02)
+    data_arr3 = [zero_impu(matrix) for matrix in data_arr1]
+    accs2 = train_and_evaluate(data_arr3, label_arr1, k=3, epochs=100, lr=0.02)
+    data_arr4 = [median_impu(matrix) for matrix in data_arr1]
+    accs3 = train_and_evaluate(data_arr4, label_arr1, k=3, epochs=100, lr=0.02)
+    data_arr5 = [mode_impu(matrix) for matrix in data_arr1]
+    accs4 = train_and_evaluate(data_arr5, label_arr1, k=3, epochs=100, lr=0.02)
+    data_arr6 = [random_impu(matrix) for matrix in data_arr1]
+    accs5 = train_and_evaluate(data_arr6, label_arr1, k=3, epochs=100, lr=0.02)
+    data_arr7 = [knn_impu(matrix) for matrix in data_arr1]
+    accs6 = train_and_evaluate(data_arr7, label_arr1, k=3, epochs=100, lr=0.02)
+    data_arr8 = [mean_impu(matrix) for matrix in data_arr1]
+    accs7 = train_and_evaluate(data_arr8, label_arr1, k=3, epochs=100, lr=0.02)
+    data_arr9 = [ffill_impu(matrix) for matrix in data_arr1]
+    accs8 = train_and_evaluate(data_arr9, label_arr1, k=3, epochs=100, lr=0.02)
+    data_arr10 = [bfill_impu(matrix) for matrix in data_arr1]
+    accs9 = train_and_evaluate(data_arr10, label_arr1, k=3, epochs=100, lr=0.02)    
+    
+    results = {
+    'Causal-Impute': accs,
+    'Zero-Impute': accs2,
+    'Median-Impute': accs3,
+    'Mode-Impute': accs4,
+    'Random-Impute': accs5,
+    'KNN-Impute': accs6,
+    'Mean-Impute': accs7,
+    'FFill-Impute': accs8,
+    'BFill-Impute': accs9,
+    }
+
+    table = []
+
+    for method, metrics in results.items():
+        row = {
+            'Method': method,
+            'Accuracy (mean ± std)': f"{metrics['Accuracy'][0]:.2%} ± {metrics['Accuracy'][1]:.2%}",
+            'Precision (mean ± std)': f"{metrics['Precision'][0]:.2%} ± {metrics['Precision'][1]:.2%}",
+            'Recall (mean ± std)': f"{metrics['Recall'][0]:.2%} ± {metrics['Recall'][1]:.2%}",
+            'F1 Score (mean ± std)': f"{metrics['F1'][0]:.2%} ± {metrics['F1'][1]:.2%}",
+            'AUROC (mean ± std)': f"{metrics['AUROC'][0]:.4f} ± {metrics['AUROC'][1]:.4f}",
+        }
+        table.append(row)
+
+    df_results = pd.DataFrame(table)
+    
+    print(df_results)
+
+    # 或保存为 CSV 文件
+    df_results.to_csv('imputation_comparison_results.csv', index=False)
+
