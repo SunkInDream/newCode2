@@ -21,6 +21,7 @@ from sklearn.cluster import KMeans
 from models_CAUSAL import *
 from models_TCDF import *
 from baseline import *
+from models_downstream import *
 def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=None):
     if gpu_id is not None and torch.cuda.is_available():
         device = torch.device(f'cuda:{gpu_id}')
@@ -133,6 +134,7 @@ def parallel_impute_folder(causal_matrix, input_dir, model_params, epochs=100, l
         filename, result = result_queue.get()
         if result is not None:
             results.append(result)
+            pd.DataFrame(result).to_csv(f"./data_imputed/{filename}", index=False)
         else:
             print(f"[错误] {filename} 填补失败")
 
@@ -392,3 +394,65 @@ def parellel_mse_compare(res, cg):
         print("各方法平均 MSE:")
         for method, v in sorted(avg_mse.items()):
             print(f"{method:12s}: {v:.6f}")
+def evaluate_imputation_methods(data_arr, label_arr, k=4, epochs=100, lr=0.02):
+    """
+    评估多种插补方法的性能
+    
+    参数:
+        data_arr: 原始数据数组（包含缺失值）
+        label_arr: 标签数组
+        k: 交叉验证折数
+        epochs: 训练轮数
+        lr: 学习率
+        
+    返回:
+        dict: 包含各种插补方法评估结果的字典
+    """
+    results = {}
+    
+    # 因果插补方法 (假设data_imputed目录中已有数据)
+    data_arr_causal, label_arr_causal = Prepare_data('./data_imputed/', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
+    accs = train_and_evaluate(data_arr_causal, label_arr_causal, k=k, epochs=epochs, lr=lr)
+    results['Causal-Impute'] = accs
+    
+    # 零值插补
+    data_arr_zero = [zero_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_zero, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Zero-Impute'] = accs
+    
+    # 中位数插补
+    data_arr_median = [median_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_median, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Median-Impute'] = accs
+    
+    # 众数插补
+    data_arr_mode = [mode_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_mode, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Mode-Impute'] = accs
+    
+    # 随机插补
+    data_arr_random = [random_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_random, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Random-Impute'] = accs
+    
+    # KNN插补
+    data_arr_knn = [knn_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_knn, label_arr, k=k, epochs=epochs, lr=lr)
+    results['KNN-Impute'] = accs
+    
+    # 均值插补
+    data_arr_mean = [mean_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_mean, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Mean-Impute'] = accs
+    
+    # 前向填充插补
+    data_arr_ffill = [ffill_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_ffill, label_arr, k=k, epochs=epochs, lr=lr)
+    results['FFill-Impute'] = accs
+    
+    # 后向填充插补
+    data_arr_bfill = [bfill_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_bfill, label_arr, k=k, epochs=epochs, lr=lr)
+    results['BFill-Impute'] = accs
+    
+    return results

@@ -185,7 +185,7 @@ def generate_sparse_matrix(rows=50, cols=50, ones_per_col=3):
     return "已生成 sparse_matrix_50x50.csv"
 
 # 执行函数
-generate_sparse_matrix(50, 50, 3)
+#generate_sparse_matrix(50, 50, 3)
 # 示例用法
 #copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")
@@ -193,13 +193,13 @@ generate_sparse_matrix(50, 50, 3)
 
 # 使用示例
 #generate_and_save_lorenz_datasets(num_datasets=10, p=10, T=30, output_dir="./data")
-# extract_balanced_samples(
-#     source_dir = "./ICU_Charts/",
-#     label_file = "./static_tag.csv",
-#     id_name = "ICUSTAY_ID",
-#     label_name = "DIEINHOSPITAL",
-#     target_dir = "./data/",
-#     num_pos = 100,
-#     num_neg = 100,
-#     random_state = 42
-# )
+extract_balanced_samples(
+    source_dir = "./ICU_Charts/",
+    label_file = "./static_tag.csv",
+    id_name = "ICUSTAY_ID",
+    label_name = "DIEINHOSPITAL",
+    target_dir = "./data/",
+    num_pos = 500,
+    num_neg = 500,
+    random_state = 42
+)

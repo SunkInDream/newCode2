@@ -4,49 +4,21 @@ from baseline import *
 pd.set_option('display.max_columns', None)
 pd.set_option('display.width', None)
 model_params = {
-        'num_levels': 8,
+        'num_levels': 10,
         'kernel_size': 6,
         'dilation_c': 2
     }
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
-    data_arr = prepare_data('./data/')
+    data_arr = Prepare_data('./data/')
     cg = causal_discovery(data_arr, 20)
-    # res = parallel_impute_folder(cg, './data', model_params, epochs=100, lr=0.02)
+    # res = parallel_impute_folder(cg, './data', model_params, epochs=150, lr=0.02)
     # parellel_mse_compare(res, cg)
     
     
-    data_arr1, label_arr1 = prepare_data('./data/', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
-    data_arr2 = parallel_impute_folder(cg, './data', model_params, epochs=150, lr=0.02)
-    accs = train_and_evaluate(data_arr2, label_arr1, k=3, epochs=150, lr=0.02)
-    data_arr3 = [zero_impu(matrix) for matrix in data_arr1]
-    accs2 = train_and_evaluate(data_arr3, label_arr1, k=3, epochs=100, lr=0.02)
-    data_arr4 = [median_impu(matrix) for matrix in data_arr1]
-    accs3 = train_and_evaluate(data_arr4, label_arr1, k=3, epochs=100, lr=0.02)
-    data_arr5 = [mode_impu(matrix) for matrix in data_arr1]
-    accs4 = train_and_evaluate(data_arr5, label_arr1, k=3, epochs=100, lr=0.02)
-    data_arr6 = [random_impu(matrix) for matrix in data_arr1]
-    accs5 = train_and_evaluate(data_arr6, label_arr1, k=3, epochs=100, lr=0.02)
-    data_arr7 = [knn_impu(matrix) for matrix in data_arr1]
-    accs6 = train_and_evaluate(data_arr7, label_arr1, k=3, epochs=100, lr=0.02)
-    data_arr8 = [mean_impu(matrix) for matrix in data_arr1]
-    accs7 = train_and_evaluate(data_arr8, label_arr1, k=3, epochs=100, lr=0.02)
-    data_arr9 = [ffill_impu(matrix) for matrix in data_arr1]
-    accs8 = train_and_evaluate(data_arr9, label_arr1, k=3, epochs=100, lr=0.02)
-    data_arr10 = [bfill_impu(matrix) for matrix in data_arr1]
-    accs9 = train_and_evaluate(data_arr10, label_arr1, k=3, epochs=100, lr=0.02)    
-    
-    results = {
-    'Causal-Impute': accs,
-    'Zero-Impute': accs2,
-    'Median-Impute': accs3,
-    'Mode-Impute': accs4,
-    'Random-Impute': accs5,
-    'KNN-Impute': accs6,
-    'Mean-Impute': accs7,
-    'FFill-Impute': accs8,
-    'BFill-Impute': accs9,
-    }
+    data_arr1, label_arr1 = Prepare_data('./data/', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
+     # 评估所有插补方法
+    results = evaluate_imputation_methods(data_arr1, label_arr1, k=4, epochs=100, lr=0.02)
 
     table = []
 
