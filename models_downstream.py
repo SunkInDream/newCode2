@@ -255,7 +255,7 @@ def train_and_evaluate(data_arr, label_arr, k=5, epochs=200, lr=0.02):
         'AUROC': (np.mean(aurocs), np.std(aurocs)),
     }
 
-def evaluate_imputation_methods(data_arr, label_arr, k=4, epochs=100, lr=0.02):
+def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
     """
     评估多种插补方法的性能
     
@@ -320,18 +320,36 @@ def evaluate_imputation_methods(data_arr, label_arr, k=4, epochs=100, lr=0.02):
     accs = train_and_evaluate(data_arr_miracle, label_arr, k=k, epochs=epochs, lr=lr)
     results['Miracle-Impute'] = accs
     
-    data_arr_saits = [saits_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_saits, label_arr, k=k, epochs=epochs, lr=lr)
-    results['SAITS-Impute'] = accs
+    # data_arr_saits = [saits_impu(matrix) for matrix in data_arr]
+    # accs = train_and_evaluate(data_arr_saits, label_arr, k=k, epochs=epochs, lr=lr)
+    # results['SAITS-Impute'] = accs
     
-    data_arr_timemixerpp = [timemixerpp_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_timemixerpp, label_arr, k=k, epochs=epochs, lr=lr)
-    results['TimeMixerPP-Impute'] = accs
+    # data_arr_timemixerpp = [timemixerpp_impu(matrix) for matrix in data_arr]
+    # accs = train_and_evaluate(data_arr_timemixerpp, label_arr, k=k, epochs=epochs, lr=lr)
+    # results['TimeMixerPP-Impute'] = accs
     
-    data_arr_tefn = [tefn_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_tefn, label_arr, k=k, epochs=epochs, lr=lr)
-    results['TEFN-Impute'] = accs
+    # data_arr_tefn = [tefn_impu(matrix) for matrix in data_arr]
+    # accs = train_and_evaluate(data_arr_tefn, label_arr, k=k, epochs=epochs, lr=lr)
+    # results['TEFN-Impute'] = accs
+    # table = []
+
+    for method, metrics in results.items():
+        row = {
+            'Method': method,
+            'Accuracy (mean ± std)': f"{metrics['Accuracy'][0]:.2%} ± {metrics['Accuracy'][1]:.2%}",
+            'Precision (mean ± std)': f"{metrics['Precision'][0]:.2%} ± {metrics['Precision'][1]:.2%}",
+            'Recall (mean ± std)': f"{metrics['Recall'][0]:.2%} ± {metrics['Recall'][1]:.2%}",
+            'F1 Score (mean ± std)': f"{metrics['F1'][0]:.2%} ± {metrics['F1'][1]:.2%}",
+            'AUROC (mean ± std)': f"{metrics['AUROC'][0]:.4f} ± {metrics['AUROC'][1]:.4f}",
+        }
+        table.append(row)
+
+    df_results = pd.DataFrame(table)
     
+    print(df_results)
+
+    # 或保存为 CSV 文件
+    df_results.to_csv('imputation_comparison_results.csv', index=False)
     return results
 
 
