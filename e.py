@@ -199,7 +199,7 @@ extract_balanced_samples(
     id_name = "ICUSTAY_ID",
     label_name = "DIEINHOSPITAL",
     target_dir = "./data/",
-    num_pos = 500,
-    num_neg = 500,
+    num_pos = 50,
+    num_neg = 50,
     random_state = 42
 )

@@ -1,10 +1,8 @@
 import pandas as pd
 from models_impute import impute
-model_params = {
-    'num_levels': 6,
-    'kernel_size': 6,
-    'dilation_c': 4,
-    }
-data = pd.read_csv('ICU_Charts/200003.csv')
-cg = pd.read_csv('cgg.csv').values  
-data_imputed = impute(data.values, cg, model_params=model_params)
+from baseline import *
+data = pd.read_csv('ICU_Charts/200003.csv').values
+print(data)
+data_imputed = tefn_impu(data)
+print(data_imputed)
+pd.DataFrame(data_imputed).to_csv('test.csv')

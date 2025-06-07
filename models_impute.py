@@ -80,15 +80,9 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=No
         model.eval()
         with torch.no_grad():
             out = model(x).squeeze().cpu().numpy()
-            # pd.DataFrame(out).to_csv(f"imputed_target_{target}.csv")
-            # print(out)
-            # pd.DataFrame(mask).to_csv(f"mask_target_{target}.csv")
             to_fill = np.where(mask[:, target] == 0) # 原始缺失才填补
-            #print(f"Target {target} 填补完成，填补位置: {to_fill[0]}")
             final_filled[to_fill, target] = out[to_fill]
-        #pd.DataFrame(final_filled).to_csv(f"imputed_target_{target}.csv")
     return final_filled
-
 def impute_worker(task_queue, causal_matrix, result_queue, model_params, epochs, lr, gpu_id):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     torch.cuda.set_device(0)
@@ -142,8 +136,6 @@ def parallel_impute_folder(causal_matrix, input_dir, model_params, epochs=100, l
         p.join()
 
     return results
-
-
 def agregate(initial_filled, n_cluster):
     # Step 1: 每个样本按列取均值，构造聚类输入
     data = np.array([np.nanmean(x, axis=0) for x in initial_filled])
@@ -182,8 +174,6 @@ def causal_worker(task_queue, result_queue, initial_matrix_arr, params, gpu_id):
         except Exception as e:
             print(f"[GPU {gpu_id}] 任务 {task_id} 失败: {e}")
             result_queue.put((task_id, None))
-
-
 def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standard_cg=None,
                      params={
                          'layers': 6,
@@ -284,38 +274,35 @@ def mse_evaluate(mx, causal_matrix, gpu_id=None):
         'knn_impu':    mse(knn_impu(X_block), ground_truth),
         'ffill_impu':  mse(ffill_impu(X_block), ground_truth),
         'bfill_impu':  mse(bfill_impu(X_block), ground_truth),
+        'miracle_impu': mse(miracle_impu(X_block), ground_truth),
+        'saits_impu':  mse(saits_impu(X_block), ground_truth),
+        'timemixerpp_impu': mse(timemixerpp_impu(X_block), ground_truth),
+        'tefn_impu':   mse(tefn_impu(X_block), ground_truth)
     }
-
 def mse_worker(task_queue, result_queue, causal_matrix, gpu_id):
-    # 设置环境变量，限制此进程只能看到一个GPU
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    
+    torch.cuda.set_device(0)  
+
     print(f"Worker启动，物理GPU ID={gpu_id}，可见设备={os.environ['CUDA_VISIBLE_DEVICES']}")
-    
+
     while True:
         item = task_queue.get()
         if item is None:
             break
-        
+
         idx, item_data = item
         try:
-            # 检查并正确提取矩阵数据
             if isinstance(item_data, tuple) and len(item_data) > 1:
-                # 如果是(filename, matrix)格式
                 filename, matrix = item_data
                 print(f"[Worker GPU {gpu_id}] 任务{idx}: 处理文件 {filename}")
             else:
-                # 直接就是矩阵
                 matrix = item_data
-            
-            # 确保matrix是正确的二维numpy数组
+
             if not isinstance(matrix, np.ndarray):
                 raise TypeError(f"期望numpy数组，得到{type(matrix)}")
-            
             if matrix.ndim != 2:
                 raise ValueError(f"期望二维矩阵，得到{matrix.ndim}维")
-            
-            # 传入二维矩阵，mse_evaluate内部会转成三维
+
             result = mse_evaluate(matrix, causal_matrix, gpu_id=0)
             result_queue.put((idx, result))
             print(f"[Worker GPU {gpu_id}] 完成任务 {idx}")
@@ -324,7 +311,6 @@ def mse_worker(task_queue, result_queue, causal_matrix, gpu_id):
             print(f"[Worker GPU {gpu_id}] 评估任务 {idx} 失败: {e}")
             print(traceback.format_exc())
             result_queue.put((idx, None))
-
 def parallel_mse_evaluate(res_list, causal_matrix):
     num_gpus = torch.cuda.device_count()
     print(f"发现 {num_gpus} 个GPU设备")
@@ -372,17 +358,12 @@ def parallel_mse_evaluate(res_list, causal_matrix):
     for p in workers:
         p.join()
     
-    return results
-def parellel_mse_compare(res, cg):
-    print(f"共 {len(res)} 个矩阵，开始批量 MSE 评估…")
-    mse_dicts = parallel_mse_evaluate(res, causal_matrix=cg)
-    valid_mse_dicts = [d for d in mse_dicts if d is not None]
+    valid_mse_dicts = [d for d in results if d is not None]
     if not valid_mse_dicts:
         print("错误: 所有MSE评估任务均失败!")
     else:
-        print(f"成功完成 {len(valid_mse_dicts)}/{len(mse_dicts)} 个MSE评估")
+        print(f"成功完成 {len(valid_mse_dicts)}/{len(results)} 个MSE评估")
         
-        # ✅ 进度条加在每个方法的平均 MSE 计算上
         avg_mse = {}
         for method in tqdm(valid_mse_dicts[0], desc="计算平均 MSE"):
             vals = [d[method] for d in valid_mse_dicts if d is not None]
@@ -394,65 +375,12 @@ def parellel_mse_compare(res, cg):
         print("各方法平均 MSE:")
         for method, v in sorted(avg_mse.items()):
             print(f"{method:12s}: {v:.6f}")
-def evaluate_imputation_methods(data_arr, label_arr, k=4, epochs=100, lr=0.02):
-    """
-    评估多种插补方法的性能
-    
-    参数:
-        data_arr: 原始数据数组（包含缺失值）
-        label_arr: 标签数组
-        k: 交叉验证折数
-        epochs: 训练轮数
-        lr: 学习率
+            
+        results_df = pd.DataFrame([
+            {'Method': method, 'Average_MSE': v} 
+            for method, v in sorted(avg_mse.items())
+        ])
+        results_df.to_csv('mse_evaluation_results.csv', index=False)
+        print(f"结果已保存到: mse_evaluation_results.csv")
         
-    返回:
-        dict: 包含各种插补方法评估结果的字典
-    """
-    results = {}
-    
-    # 因果插补方法 (假设data_imputed目录中已有数据)
-    data_arr_causal, label_arr_causal = Prepare_data('./data_imputed/', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
-    accs = train_and_evaluate(data_arr_causal, label_arr_causal, k=k, epochs=epochs, lr=lr)
-    results['Causal-Impute'] = accs
-    
-    # 零值插补
-    data_arr_zero = [zero_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_zero, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Zero-Impute'] = accs
-    
-    # 中位数插补
-    data_arr_median = [median_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_median, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Median-Impute'] = accs
-    
-    # 众数插补
-    data_arr_mode = [mode_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_mode, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Mode-Impute'] = accs
-    
-    # 随机插补
-    data_arr_random = [random_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_random, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Random-Impute'] = accs
-    
-    # KNN插补
-    data_arr_knn = [knn_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_knn, label_arr, k=k, epochs=epochs, lr=lr)
-    results['KNN-Impute'] = accs
-    
-    # 均值插补
-    data_arr_mean = [mean_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_mean, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Mean-Impute'] = accs
-    
-    # 前向填充插补
-    data_arr_ffill = [ffill_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_ffill, label_arr, k=k, epochs=epochs, lr=lr)
-    results['FFill-Impute'] = accs
-    
-    # 后向填充插补
-    data_arr_bfill = [bfill_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_bfill, label_arr, k=k, epochs=epochs, lr=lr)
-    results['BFill-Impute'] = accs
-    
-    return results
+        return avg_mse

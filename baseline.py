@@ -1,9 +1,16 @@
 import numpy as np
 import pandas as pd
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 from sklearn.impute import KNNImputer
 from miracle import *
-from pypots.imputation import SAITS,TimeMixerPP
+from pypots.imputation import SAITS,TimeMixerPP,TimeLLM,MOMENT,TEFN
 from typing import Optional
+from pypots.optim.adam import Adam
+from pypots.nn.modules.loss import MAE, MSE
+import torch
+from torch.utils.data import Dataset, DataLoader
+
 def zero_impu(mx):
    return np.nan_to_num(mx, nan=0)
 def mean_impu(mx):
@@ -113,9 +120,9 @@ def miracle_impu(mx):
         ckpt_file="tmp.ckpt",
         missing_list=missing_idxs,
         reg_m=0.1,
-        lr=0.0001,
+        lr=0.01,
         window=10,
-        max_steps=400,
+        max_steps=800,
     )
     miracle_imputed_data_x = miracle.fit(
         mx,
@@ -211,12 +218,12 @@ def saits_impu(data_with_missing,
 
 def timemixerpp_impu(
     data_matrix: np.ndarray,
-    n_layers: int = 4,
-    d_model: int = 64,
-    d_ffn: int = 128,
-    top_k: int = 5,
-    n_heads: int = 8,
-    n_kernels: int = 6,
+    n_layers: int = 3,
+    d_model: int = 16,
+    d_ffn: int = 32,
+    top_k: int = 3,
+    n_heads: int = 4,
+    n_kernels: int = 4,
     dropout: float = 0.1,
     epochs: int = 300,
     batch_size: int = 32,
@@ -299,3 +306,81 @@ def timemixerpp_impu(
     except Exception as e:
         print(f"模型训练或预测过程中出现错误: {e}")
         raise
+
+def tefn_impu(data_np: np.ndarray) -> np.ndarray:
+    """
+    用 TEFN 模型对一个带缺失的二维 NumPy 数组进行填补。
+
+    参数:
+        data_np (np.ndarray): shape 为 (time_steps, features)，其中包含 np.nan 表示缺失值。
+
+    返回:
+        np.ndarray: 同样 shape 的已填补数据
+    """
+    assert data_np.ndim == 2, "输入必须是二维矩阵 (时间步, 特征数)"
+    n_steps, n_features = data_np.shape
+
+    # 构造 batch 数据：添加 batch 维度
+    data = data_np[None, :, :]  # shape: (1, T, F)
+    missing_mask = (~np.isnan(data)).astype(np.float32)
+    indicating_mask = 1 - missing_mask
+    data_filled = np.nan_to_num(data, nan=0.0).astype(np.float32)
+    X_ori_no_nan = np.nan_to_num(data, nan=0.0).astype(np.float32)
+
+    # 封装 Dataset
+    class OneSampleDataset(Dataset):
+        def __len__(self): return 1
+        def __getitem__(self, idx):
+            return (
+                idx,
+                data_filled[0],
+                missing_mask[0],
+                X_ori_no_nan[0],
+                indicating_mask[0],
+            )
+
+    dataloader = DataLoader(OneSampleDataset(), batch_size=1, shuffle=False)
+
+    # 初始化 TEFN 模型
+    model = TEFN(
+        n_steps=n_steps,
+        n_features=n_features,
+        n_fod=2,
+        apply_nonstationary_norm=True,
+        ORT_weight=1.0,
+        MIT_weight=1.0,
+        batch_size=1,
+        epochs=10,
+        patience=5,
+        training_loss=MAE,
+        validation_metric=MSE,
+        optimizer=Adam,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        saving_path=None,
+        model_saving_strategy=None,
+        verbose=False,
+    )
+
+    # 使用自身数据训练模型
+    model._train_model(dataloader, dataloader)
+    model.model.load_state_dict(model.best_model_dict)
+
+    # 构造推理数据
+    X = torch.tensor(data_filled, dtype=torch.float32).to(model.device)
+    missing_mask = torch.tensor(missing_mask, dtype=torch.float32).to(model.device)
+
+    # 推理填补
+    model.model.eval()
+    with torch.no_grad():
+        output = model.model({
+            'X': X,
+            'missing_mask': missing_mask,
+        })
+        imputed = output['imputation']
+
+    # 替换缺失位置
+    X_ori_tensor = torch.tensor(X_ori_no_nan, dtype=torch.float32).to(model.device)
+    result = X_ori_tensor.clone()
+    result[missing_mask == 0] = imputed[missing_mask == 0]
+
+    return result.cpu().numpy().squeeze()
