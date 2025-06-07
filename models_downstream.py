@@ -331,7 +331,7 @@ def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
     # data_arr_tefn = [tefn_impu(matrix) for matrix in data_arr]
     # accs = train_and_evaluate(data_arr_tefn, label_arr, k=k, epochs=epochs, lr=lr)
     # results['TEFN-Impute'] = accs
-    # table = []
+    table = []
 
     for method, metrics in results.items():
         row = {
