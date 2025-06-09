@@ -128,7 +128,7 @@ def parallel_impute_folder(causal_matrix, input_dir, model_params, epochs=100, l
         filename, result = result_queue.get()
         if result is not None:
             results.append(result)
-            pd.DataFrame(result).to_csv(f"./data_imputed/{filename}", index=False)
+            pd.DataFrame(result).to_csv(f"./data_imputed/my_model/{filename}", index=False)
         else:
             print(f"[错误] {filename} 填补失败")
 
