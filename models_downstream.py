@@ -272,9 +272,9 @@ def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
     results = {}
     
     # 因果插补方法 (假设data_imputed目录中已有数据)
-    # data_arr_causal, label_arr_causal = Prepare_data('./data_imputed/', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
-    # accs = train_and_evaluate(data_arr_causal, label_arr_causal, k=k, epochs=epochs, lr=lr)
-    # results['Causal-Impute'] = accs
+    data_arr_causal, label_arr_causal = Prepare_data('./data_imputed/my_model', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
+    accs = train_and_evaluate(data_arr_causal, label_arr_causal, k=k, epochs=epochs, lr=lr)
+    results['Causal-Impute'] = accs
     
     # # 零值插补
     # data_arr_zero = [zero_impu(matrix) for matrix in data_arr]
@@ -316,9 +316,9 @@ def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
     # accs = train_and_evaluate(data_arr_bfill, label_arr, k=k, epochs=epochs, lr=lr)
     # results['BFill-Impute'] = accs
     
-    data_arr_miracle = [miracle_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_miracle, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Miracle-Impute'] = accs
+    # data_arr_miracle = [miracle_impu(matrix) for matrix in data_arr]
+    # accs = train_and_evaluate(data_arr_miracle, label_arr, k=k, epochs=epochs, lr=lr)
+    # results['Miracle-Impute'] = accs
     
     # data_arr_saits = [saits_impu(matrix) for matrix in data_arr]
     # accs = train_and_evaluate(data_arr_saits, label_arr, k=k, epochs=epochs, lr=lr)
