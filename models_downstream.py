@@ -3,7 +3,7 @@ import torch.nn as nn
 import os
 import numpy as np
 import pandas as pd
-import multiprocessing
+import multiprocessing as mp
 from tqdm import tqdm
 from sklearn.model_selection import KFold
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score, precision_score, recall_score
@@ -171,75 +171,63 @@ def Prepare_data(data_dir, label_file=None, id_name=None, label_name=None):
 
         return data_arr, label_arr
         
-def train_and_evaluate(data_arr, label_arr, k=5, epochs=200, lr=0.02):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    use_multi_gpu = torch.cuda.device_count() > 1
+def train_fold(fold_args):
+    fold, train_idx, val_idx, data_arr, label_arr, epochs, lr, gpu_id = fold_args
+    torch.cuda.set_device(gpu_id)
+    device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
 
     dataset = MatrixDataset(data_arr, label_arr)
+    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=16, shuffle=True)
+    val_loader = DataLoader(Subset(dataset, val_idx), batch_size=16)
+
+    model = SimpleLSTMClassifier(input_dim=data_arr[0].shape[1]).to(device)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    for _ in range(epochs):
+        model.train()
+        for x, y in train_loader:
+            x = x.to(device)
+            y = y.unsqueeze(1).float().to(device)
+            logits = model(x)
+            loss = criterion(logits, y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+    model.eval()
+    all_labels, all_preds, all_scores = [], [], []
+    with torch.no_grad():
+        for x, y in val_loader:
+            x = x.to(device)
+            y = y.unsqueeze(1).float().to(device)
+            logits = model(x)
+            probs = torch.sigmoid(logits)
+            preds = (probs > 0.5).float()
+            all_labels.extend(y.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            all_scores.extend(probs.cpu().numpy())
+
+    return (
+        accuracy_score(all_labels, all_preds),
+        precision_score(all_labels, all_preds, zero_division=0),
+        recall_score(all_labels, all_preds, zero_division=0),
+        f1_score(all_labels, all_preds, zero_division=0),
+        roc_auc_score(all_labels, all_scores)
+    )
+
+def train_and_evaluate(data_arr, label_arr, k=5, epochs=200, lr=0.02):
     kf = KFold(n_splits=k, shuffle=True, random_state=42)
+    num_gpus = torch.cuda.device_count()
+    tasks = []
+    for fold, (train_idx, val_idx) in enumerate(kf.split(data_arr)):
+        gpu_id = fold % num_gpus  # 轮流分配 GPU
+        tasks.append((fold, train_idx, val_idx, data_arr, label_arr, epochs, lr, gpu_id))
 
-    accs, precs, recs, f1s, aurocs = [], [], [], [], []
+    with mp.get_context("spawn").Pool(processes=min(k, num_gpus)) as pool:
+        results = pool.map(train_fold, tasks)
 
-    for fold, (train_idx, val_idx) in enumerate(kf.split(dataset)):
-        print(f"\n=== Fold {fold + 1}/{k} ===")
-
-        train_loader = DataLoader(Subset(dataset, train_idx), batch_size=16, shuffle=True)
-        val_loader = DataLoader(Subset(dataset, val_idx), batch_size=16)
-
-        # 模型实例化 + 多 GPU 包装
-        model = SimpleLSTMClassifier(input_dim=data_arr[0].shape[1])
-        if use_multi_gpu:
-            model = nn.DataParallel(model)
-        model = model.to(device)
-
-        criterion = nn.BCEWithLogitsLoss()
-        optimizer = optim.Adam(model.parameters(), lr=lr)
-
-        # === 训练阶段 ===
-        for _ in tqdm(range(epochs), desc=f"Training Fold {fold+1}"):
-            model.train()
-            for x, y in train_loader:
-                x = x.to(device)
-                y = y.unsqueeze(1).float().to(device)
-
-                logits = model(x)
-                loss = criterion(logits, y)
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-        # === 验证阶段 ===
-        model.eval()
-        all_labels, all_preds, all_scores = [], [], []
-        with torch.no_grad():
-            for x, y in val_loader:
-                x = x.to(device)
-                y = y.unsqueeze(1).float().to(device)
-
-                logits = model(x)
-                probs = torch.sigmoid(logits)
-                preds = (probs > 0.5).float()
-
-                all_labels.extend(y.cpu().numpy())
-                all_preds.extend(preds.cpu().numpy())
-                all_scores.extend(probs.cpu().numpy())
-
-        acc   = accuracy_score(all_labels, all_preds)
-        prec  = precision_score(all_labels, all_preds, zero_division=0)
-        rec   = recall_score(all_labels, all_preds, zero_division=0)
-        f1    = f1_score(all_labels, all_preds, zero_division=0)
-        auroc = roc_auc_score(all_labels, all_scores)
-
-        print(f"Fold {fold+1} — Accuracy: {acc:.2%}, Precision: {prec:.2%}, "
-              f"Recall: {rec:.2%}, F1: {f1:.2%}, AUROC: {auroc:.4f}")
-
-        accs.append(acc)
-        precs.append(prec)
-        recs.append(rec)
-        f1s.append(f1)
-        aurocs.append(auroc)
-
+    accs, precs, recs, f1s, aurocs = zip(*results)
     print("\n=== Average over folds ===")
     print(f"Accuracy : {np.mean(accs):.2%} ± {np.std(accs):.2%}")
     print(f"Precision: {np.mean(precs):.2%} ± {np.std(precs):.2%}")
@@ -276,61 +264,61 @@ def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
     accs = train_and_evaluate(data_arr_causal, label_arr_causal, k=k, epochs=epochs, lr=lr)
     results['Causal-Impute'] = accs
     
-    # # 零值插补
-    # data_arr_zero = [zero_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_zero, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['Zero-Impute'] = accs
+    # 零值插补
+    data_arr_zero = [zero_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_zero, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Zero-Impute'] = accs
     
-    # # 中位数插补
-    # data_arr_median = [median_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_median, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['Median-Impute'] = accs
+    # 中位数插补
+    data_arr_median = [median_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_median, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Median-Impute'] = accs
     
-    # # 众数插补
-    # data_arr_mode = [mode_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_mode, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['Mode-Impute'] = accs
+    # 众数插补
+    data_arr_mode = [mode_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_mode, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Mode-Impute'] = accs
     
-    # # 随机插补
-    # data_arr_random = [random_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_random, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['Random-Impute'] = accs
+    # 随机插补
+    data_arr_random = [random_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_random, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Random-Impute'] = accs
     
-    # # KNN插补
-    # data_arr_knn = [knn_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_knn, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['KNN-Impute'] = accs
+    # KNN插补
+    data_arr_knn = [knn_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_knn, label_arr, k=k, epochs=epochs, lr=lr)
+    results['KNN-Impute'] = accs
     
-    # # 均值插补
-    # data_arr_mean = [mean_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_mean, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['Mean-Impute'] = accs
+    # 均值插补
+    data_arr_mean = [mean_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_mean, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Mean-Impute'] = accs
     
-    # # 前向填充插补
-    # data_arr_ffill = [ffill_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_ffill, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['FFill-Impute'] = accs
+    # 前向填充插补
+    data_arr_ffill = [ffill_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_ffill, label_arr, k=k, epochs=epochs, lr=lr)
+    results['FFill-Impute'] = accs
     
-    # # 后向填充插补
-    # data_arr_bfill = [bfill_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_bfill, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['BFill-Impute'] = accs
+    # 后向填充插补
+    data_arr_bfill = [bfill_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_bfill, label_arr, k=k, epochs=epochs, lr=lr)
+    results['BFill-Impute'] = accs
     
-    # data_arr_miracle = [miracle_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_miracle, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['Miracle-Impute'] = accs
+    data_arr_miracle = [miracle_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_miracle, label_arr, k=k, epochs=epochs, lr=lr)
+    results['Miracle-Impute'] = accs
     
-    # data_arr_saits = [saits_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_saits, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['SAITS-Impute'] = accs
+    data_arr_saits = [saits_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_saits, label_arr, k=k, epochs=epochs, lr=lr)
+    results['SAITS-Impute'] = accs
     
-    # data_arr_timemixerpp = [timemixerpp_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_timemixerpp, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['TimeMixerPP-Impute'] = accs
+    data_arr_timemixerpp = [timemixerpp_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_timemixerpp, label_arr, k=k, epochs=epochs, lr=lr)
+    results['TimeMixerPP-Impute'] = accs
     
-    # data_arr_tefn = [tefn_impu(matrix) for matrix in data_arr]
-    # accs = train_and_evaluate(data_arr_tefn, label_arr, k=k, epochs=epochs, lr=lr)
-    # results['TEFN-Impute'] = accs
+    data_arr_tefn = [tefn_impu(matrix) for matrix in data_arr]
+    accs = train_and_evaluate(data_arr_tefn, label_arr, k=k, epochs=epochs, lr=lr)
+    results['TEFN-Impute'] = accs
     table = []
 
     for method, metrics in results.items():
