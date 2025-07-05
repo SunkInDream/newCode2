@@ -20,7 +20,7 @@ if __name__ == "__main__":
     data_arr = Prepare_data('./data/mimic')
     cg = causal_discovery(data_arr, 20)
     
-    res = parallel_impute(cg, './data/mimic', model_params, epochs=150, lr=0.02)
+    res = parallel_impute('./data/mimic', cg, model_params, epochs=150, lr=0.02)
     parallel_mse_evaluate(res, cg)
     
     data_arr1, label_arr1 = Prepare_data('./data/mimic', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
