@@ -87,7 +87,14 @@ def compute_causal_matrix_with_gpu(args):
 def compute_causal_matrix(file_or_array, params, gpu_id=0):
     x, mask, columns = prepare_data(file_or_array)
     num_features = x.shape[1]
-    device = f'cuda:{gpu_id}' if torch.cuda.device_count() > gpu_id else 'cpu'
+    
+    # 修复设备选择逻辑
+    if gpu_id == 'cpu' or not torch.cuda.is_available():
+        device = 'cpu'
+    elif isinstance(gpu_id, int) and gpu_id < torch.cuda.device_count():
+        device = f'cuda:{gpu_id}'
+    else:
+        device = 'cpu'
     
     # 串行处理各个特征
     results = [] 

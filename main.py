@@ -24,7 +24,6 @@ if __name__ == "__main__":
     parallel_mse_evaluate(res, cg)
     
     data_arr1, label_arr1 = Prepare_data('./data/mimic', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
-     # 评估所有插补方法
     results = evaluate_downstream(data_arr1, label_arr1, k=4, epochs=100, lr=0.02)
 
     

@@ -1,44 +1,125 @@
 import os
 import torch
+import random
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import tensorflow as tf
 import multiprocessing as mp 
 from models_TCDF import *
 import torch.nn.functional as F
-from pygrinder import (
-    mcar,
-    mar_logistic,
-    mnar_x,
-    mnar_t,
-    mnar_nonuniform,
-    rdo,
-    seq_missing,
-    block_missing,
-    calc_missing_rate
-)
+from pygrinder import block_missing
 from sklearn.cluster import KMeans
-from models_CAUSAL import *
 from models_TCDF import *
 from baseline import *
 from models_downstream import *
+def FirstProcess(matrix, threshold=0.8):
+    df = pd.DataFrame(matrix)
+    for column in df.columns:
+        col_data = df[column]
+        if col_data.isna().all():
+            df[column] = -1
+        else:
+            non_nan_data = col_data.dropna()
+            value_counts = non_nan_data.value_counts()
+            mode_value = value_counts.index[0]
+            mode_count = value_counts.iloc[0]
+            if mode_count >= threshold * len(non_nan_data):
+                df[column] = col_data.fillna(mode_value)
+    return df.values
+
+def SecondProcess(matrix, perturbation_prob=0.1, perturbation_scale=0.1):
+    df_copy = pd.DataFrame(matrix)
+    for column in df_copy.columns:
+        series = df_copy[column]
+        missing_mask = series.isna()
+
+        if not missing_mask.any():
+            continue  # 如果没有缺失值，跳过该列
+        missing_segments = []
+        start_idx = None
+
+        # 查找缺失值的连续段
+        for i, is_missing in enumerate(missing_mask):
+            if is_missing and start_idx is None:
+                start_idx = i
+            elif not is_missing and start_idx is not None:
+                missing_segments.append((start_idx, i - 1))
+                start_idx = None
+        if start_idx is not None:
+            missing_segments.append((start_idx, len(missing_mask) - 1))
+
+        # 对每个缺失段进行填补
+        for start, end in missing_segments:
+            left_value, right_value = None, None
+            left_idx, right_idx = start - 1, end + 1
+
+            # 找到前后最近的非缺失值
+            while left_idx >= 0 and np.isnan(series.iloc[left_idx]):
+                left_idx -= 1
+            if left_idx >= 0:
+                left_value = series.iloc[left_idx]
+
+            while right_idx < len(series) and np.isnan(series.iloc[right_idx]):
+                right_idx += 1
+            if right_idx < len(series):
+                right_value = series.iloc[right_idx]
+
+            # 如果前后都没有非缺失值，使用均值填充
+            if left_value is None and right_value is None:
+                fill_value = series.dropna().mean()
+                df_copy.loc[missing_mask, column] = fill_value
+                continue
+
+            # 如果只有一个方向有非缺失值，使用另一个方向的值填充
+            if left_value is None:
+                left_value = right_value
+            elif right_value is None:
+                right_value = left_value
+
+            # 使用等差数列填补缺失值
+            segment_length = end - start + 1
+            step = (right_value - left_value) / (segment_length + 1)
+            values = [left_value + step * (i + 1) for i in range(segment_length)]
+
+            # 添加扰动
+            value_range = np.abs(right_value - left_value) or (np.abs(left_value) * 0.1 if left_value != 0 else 1.0)
+            for i in range(len(values)):
+                if random.random() < perturbation_prob:
+                    perturbation = random.uniform(-1, 1) * perturbation_scale * value_range
+                    values[i] += perturbation
+
+            # 将填补后的值赋回数据框
+            for i, value in enumerate(values):
+                df_copy.iloc[start + i, df_copy.columns.get_loc(column)] = value
+
+    return df_copy.values.astype(np.float32)
+
+def initial_process(matrix, threshold=0.8, perturbation_prob=0.1, perturbation_scale=0.1):
+    matrix = FirstProcess(matrix, threshold)
+    matrix = SecondProcess(matrix, perturbation_prob, perturbation_scale)
+    return matrix
+
 def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=None):
     if gpu_id is not None and torch.cuda.is_available():
         device = torch.device(f'cuda:{gpu_id}')
     else:
         device = torch.device('cpu')
     
-    # 预计算所有张量
-    mask = (~np.isnan(original)).astype(int)
-    initial_filled = initial_process(original)
+    # # 预计算所有张量
+    # mask = (~np.isnan(original)).astype(int)
+    first_stage_initial_filled = FirstProcess(original)
+    mask = (~np.isnan(first_stage_initial_filled)).astype(int)
+    second_stage_initial_filled = SecondProcess(first_stage_initial_filled)
+    initial_filled = second_stage_initial_filled
     sequence_len, total_features = initial_filled.shape
     final_filled = initial_filled.copy()
     
-    # 批处理准备数据
-    all_inputs = []
-    all_targets = []
-    all_masks = []
-    all_inds = []
+    # # 批处理准备数据
+    # all_inputs = []
+    # all_targets = []
+    # all_masks = []
+    # all_inds = []
     
     for target in range(total_features):
         inds = list(np.where(causal_matrix[:, target] == 1)[0])
@@ -49,18 +130,18 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=No
             inds.append(target)
         inds = inds[:3] + [target]
         
-        inp = torch.tensor(initial_filled[:, inds].T[np.newaxis, ...], dtype=torch.float32).to(device)
-        y_np = torch.tensor(initial_filled[:, target][np.newaxis, :, None], dtype=torch.float32).to(device)
-        m_np = torch.tensor((mask[:, target] == 1)[np.newaxis, :, None], dtype=torch.float32).to(device)
+        x = torch.tensor(initial_filled[:, inds].T[np.newaxis, ...], dtype=torch.float32).to(device)
+        y = torch.tensor(initial_filled[:, target][np.newaxis, :, None], dtype=torch.float32).to(device)
+        m = torch.tensor((mask[:, target] == 1)[np.newaxis, :, None], dtype=torch.float32).to(device)
         
-        all_inputs.append(inp)
-        all_targets.append(y_np)
-        all_masks.append(m_np)
-        all_inds.append(inds)
+        # all_inputs.append(inp)
+        # all_targets.append(y_np)
+        # all_masks.append(m_np)
+        # all_inds.append(inds)
     
-    # 并行训练多个特征
-    for target in range(total_features):
-        x, y, m, inds = all_inputs[target], all_targets[target], all_masks[target], all_inds[target]
+    # # 并行训练多个特征
+    # for target in range(total_features):
+        # x, y, m, inds = all_inputs[target], all_targets[target], all_masks[target], all_inds[target]
         
         model = ADDSTCN(target, input_size=len(inds), cuda=(device != torch.device('cpu')), **model_params).to(device)
         
@@ -102,38 +183,32 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=No
         model.eval()
         with torch.no_grad():
             out = model(x).squeeze().cpu().numpy()
-            to_fill = np.where(mask[:, target] == 0)
+            to_fill = np.where(mask[:, target] == 0)   
             final_filled[to_fill, target] = out[to_fill]
     
     return final_filled
 
-def impute_single_file(args):
+def impute_single_file(file_path, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=None):
     """单文件填补函数，用于进程池"""
-    file_path, causal_matrix, model_params, epochs, lr, gpu_id = args
+    # # 设置GPU
+    # if gpu_id != 'cpu' and torch.cuda.is_available():
+    #     torch.cuda.set_device(gpu_id)
+    #     device = torch.device(f'cuda:{gpu_id}')
+    # else:
+    #     device = torch.device('cpu')
     
-    # 设置GPU
-    if gpu_id != 'cpu' and torch.cuda.is_available():
-        torch.cuda.set_device(gpu_id)
-        device = torch.device(f'cuda:{gpu_id}')
-    else:
-        device = torch.device('cpu')
-    
-    try:
-        # 读取数据
-        data = pd.read_csv(file_path).values.astype(np.float32)
-        filename = os.path.basename(file_path)
+    # 读取数据
+    data = pd.read_csv(file_path).values.astype(np.float32)
+    filename = os.path.basename(file_path)
         
-        # 调用优化后的impute函数
-        result = impute(data, causal_matrix, model_params, epochs=epochs, lr=lr, gpu_id=gpu_id)
-        
-        return filename, result
-    except Exception as e:
-        return os.path.basename(file_path), None
+    # 调用优化后的impute函数
+    result = impute(data, causal_matrix, model_params, epochs=epochs, lr=lr, gpu_id=gpu_id)
+    return filename, result
 
-def parallel_impute(causal_matrix, input_dir, model_params, epochs=100, lr=0.01, max_workers=None):
+def parallel_impute(file_path, causal_matrix, model_params, epochs=100, lr=0.01, simultaneous_per_gpu=2, max_workers=None):
     """使用进程池的并行填补"""
     # 获取文件列表
-    file_list = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith(".csv")]
+    file_list = [os.path.join(file_path, f) for f in os.listdir(file_path) if f.endswith(".csv")]
     
     # 确定工作进程数和GPU分配
     num_gpus = torch.cuda.device_count()
@@ -141,8 +216,8 @@ def parallel_impute(causal_matrix, input_dir, model_params, epochs=100, lr=0.01,
         max_workers = max_workers or os.cpu_count()
         gpu_ids = ['cpu'] * len(file_list)
     else:
-        # 每个GPU运行2个进程以提高利用率
-        max_workers = max_workers or (num_gpus * 2)
+        # 每个GPU运行simultaneous_per_gpu个进程以提高利用率
+        max_workers = max_workers or (num_gpus * simultaneous_per_gpu)
         gpu_ids = [i % num_gpus for i in range(len(file_list))]
     
     print(f"使用 {max_workers} 个进程并行处理 {len(file_list)} 个文件")
@@ -154,7 +229,7 @@ def parallel_impute(causal_matrix, input_dir, model_params, epochs=100, lr=0.01,
     # 并行执行
     with Pool(processes=max_workers) as pool:
         results = list(tqdm(
-            pool.imap(impute_single_file, args_list),
+            pool.starmap(impute_single_file, args_list),
             total=len(file_list),
             desc="批量填补中",
             ncols=80
@@ -165,18 +240,15 @@ def parallel_impute(causal_matrix, input_dir, model_params, epochs=100, lr=0.01,
     successful_results = []
     
     for filename, result in results:
-        if result is not None:
-            successful_results.append(result)
-            pd.DataFrame(result).to_csv(f"./data_imputed/my_model/{filename}", index=False)
-        else:
-            print(f"[错误] {filename} 填补失败")
+        successful_results.append(result)
+        pd.DataFrame(result).to_csv(f"./data_imputed/my_model/{filename}", index=False)
     
     print(f"成功填补 {len(successful_results)}/{len(file_list)} 个文件")
     return successful_results
 
-def agregate(initial_filled, n_cluster):
+def agregate(initial_filled_array, n_cluster):
     # Step 1: 每个样本按列取均值，构造聚类输入
-    data = np.array([np.nanmean(x, axis=0) for x in initial_filled])
+    data = np.array([np.nanmean(x, axis=0) for x in initial_filled_array])
 
     # Step 2: KMeans 聚类
     km = KMeans(n_clusters=n_cluster, n_init=10, random_state=0)
@@ -292,17 +364,15 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
             new_matrix[top3, col] = 1
 
     return new_matrix
-def mse_evaluate_single(args):
+
+def mse_evaluate(args):
     """单个MSE评估任务函数，用于进程池"""
     task_data, causal_matrix, gpu_id = args
     
-    # 在任何TensorFlow操作之前设置环境变量
-    import os
+    # # 在任何TensorFlow操作之前设置环境变量
+    # import os
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id) if gpu_id != 'cpu' else ""
     os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
-    
-    # 现在导入TensorFlow
-    import tensorflow as tf
     
     # 配置TensorFlow
     if gpu_id != 'cpu':
@@ -353,7 +423,7 @@ def mse_evaluate_single(args):
         
         # 执行MSE评估 - 传递实际的GPU设备ID
         actual_gpu_id = 0 if gpu_id != 'cpu' else None
-        result = mse_evaluate_safe(matrix, causal_matrix, device=device, tf_gpu_id=actual_gpu_id)
+        result = mse_evaluate_single_file(matrix, causal_matrix, device=device, tf_gpu_id=actual_gpu_id)
         
         return idx, result
         
@@ -363,7 +433,7 @@ def mse_evaluate_single(args):
         print(traceback.format_exc())
         return 0, None
 
-def mse_evaluate_safe(mx, causal_matrix, device=None, tf_gpu_id=None):
+def mse_evaluate_single_file(mx, causal_matrix, device=None, tf_gpu_id=None):
     """安全的MSE评估函数，避免TensorFlow设备冲突"""
     if device is None:
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -527,7 +597,7 @@ def parallel_mse_evaluate(res_list, causal_matrix, max_workers=None):
     # 并行执行
     with Pool(processes=max_workers) as pool:
         results_raw = list(tqdm(
-            pool.imap(mse_evaluate_single, args_list),
+            pool.imap(mse_evaluate_single_file, args_list),
             total=len(res_list),
             desc="MSE评估中",
             ncols=80
