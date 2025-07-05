@@ -80,8 +80,32 @@ def run_single_task(args):
     return target_idx, validated
 
 def compute_causal_matrix_with_gpu(args):
-    """包装函数，用于多进程调用"""
+    """
+    真正给 Pool 调用的 worker。
+    先隔离 GPU，再 import TF，再跑模型。
+    """
+    import os
+    import numpy as np
+    import torch   # 这里 torch 仅用于张量计算，不会占 GPU
+
     file_or_array, params, gpu_id = args
+
+    # ---------- ① GPU 隔离 ----------
+    if gpu_id == 'cpu':
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    # ---------- ② 延迟 import TF ----------
+    import tensorflow as tf
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+
+    gpus = tf.config.list_physical_devices('GPU')
+    for g in gpus:                             # GPU 数量可能为 0
+        tf.config.experimental.set_memory_growth(g, True)
+
+    # ---------- ③ 真正计算 ----------
     return compute_causal_matrix(file_or_array, params, gpu_id)
 
 def compute_causal_matrix(file_or_array, params, gpu_id=0):
