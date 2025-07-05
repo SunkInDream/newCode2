@@ -1,11 +1,11 @@
 from models_impute import *
 from models_downstream import *
 from baseline import *
-import tensorflow as tf
+# import tensorflow as tf
 
-# 在主程序开始时配置TensorFlow
-tf.config.threading.set_intra_op_parallelism_threads(1)
-tf.config.threading.set_inter_op_parallelism_threads(1)
+# # 在主程序开始时配置TensorFlow
+# tf.config.threading.set_intra_op_parallelism_threads(1)
+# tf.config.threading.set_inter_op_parallelism_threads(1)
 
 pd.set_option('display.max_columns', None)
 pd.set_option('display.width', None)
