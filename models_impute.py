@@ -597,7 +597,7 @@ def parallel_mse_evaluate(res_list, causal_matrix, max_workers=None):
     # 并行执行
     with Pool(processes=max_workers) as pool:
         results_raw = list(tqdm(
-            pool.imap(mse_evaluate_single_file, args_list),
+            pool.imap(mse_evaluate, args_list),
             total=len(res_list),
             desc="MSE评估中",
             ncols=80
