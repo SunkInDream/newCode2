@@ -18,7 +18,7 @@ model_params = {
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     data_arr = Prepare_data('./data/mimic')
-    cg = causal_discovery(data_arr, 20)
+    cg = causal_discovery(data_arr, 4)
     
     res = parallel_impute('./data/mimic', cg, model_params, epochs=150, lr=0.02)
     parallel_mse_evaluate(res, cg)

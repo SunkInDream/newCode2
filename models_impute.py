@@ -367,6 +367,7 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
 
 def mse_evaluate(args):
     """单个MSE评估任务函数，用于进程池"""
+    import tensorflow as tf
     task_data, causal_matrix, gpu_id = args
     
     # # 在任何TensorFlow操作之前设置环境变量
