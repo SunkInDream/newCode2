@@ -319,8 +319,8 @@ extract_balanced_samples(
     id_name = "ICUSTAY_ID",
     label_name = "DIEINHOSPITAL",
     target_dir = "./data/mimic",
-    num_pos = 10,
-    num_neg = 10,
+    num_pos = 1000,
+    num_neg = 1000,
     random_state = 42
 )
 # generate_and_save_lorenz_datasets(num_datasets=10, p=50, T=30, output_dir="./data/lorenz", causality_dir="./causality_matrices")
