@@ -4,11 +4,11 @@ from scipy import stats
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 from sklearn.impute import KNNImputer
-from miracle import *
-from pypots.imputation import SAITS,TimeMixerPP,TimeLLM,MOMENT,TEFN
+# from miracle import *
+# from pypots.imputation import SAITS,TimeMixerPP,TimeLLM,MOMENT,TEFN
 from typing import Optional
-from pypots.optim.adam import Adam
-from pypots.nn.modules.loss import MAE, MSE
+# from pypots.optim.adam import Adam
+# from pypots.nn.modules.loss import MAE, MSE
 import torch
 from torch.utils.data import Dataset, DataLoader
 
@@ -162,6 +162,8 @@ def miracle_impu(mx):
     #     X_seed=imputed_data_x,
     # )
     # return miracle_imputed_data_x
+    from miracle import MIRACLE
+    print("_____________1______________________")
     mx = mx.copy()
     missing_idxs = np.where(np.any(np.isnan(mx), axis=0))[0]
     mx_imputed = mean_impu(mx)
@@ -184,7 +186,9 @@ def miracle_impu(mx):
     return miracle_imputed_data_x
 
 def saits_impu(mx, epochs=100, d_model=256, n_layers=2, n_heads=4, 
-               d_k=32, d_v=32, d_ffn=64, dropout=0.2):
+               d_k=32, d_v=32, d_ffn=64, dropout=0.2, device=None):
+    from pypots.imputation import SAITS
+    # print("_____________2______________________")
     mx = mx.copy()
     n_steps, n_features = mx.shape
     data_3d = mx[np.newaxis, :, :]  # shape: (1, n_steps, n_features)
@@ -198,7 +202,8 @@ def saits_impu(mx, epochs=100, d_model=256, n_layers=2, n_heads=4,
         d_v=d_v,
         d_ffn=d_ffn,
         dropout=dropout,
-        epochs=epochs
+        epochs=epochs,
+        device=device,
     )
     
     train_set = {"X": data_3d}
@@ -208,24 +213,31 @@ def saits_impu(mx, epochs=100, d_model=256, n_layers=2, n_heads=4,
     imputed_data_2d = imputed_data_3d[0]  # shape: (n_steps, n_features)
     return imputed_data_2d
 
-def timemixerpp_impu(mx, n_layers=3, d_model=16, d_ffn=32, top_k=3,
-                     n_heads=4, n_kernels=4, dropout=0.1, epochs=300, batch_size=32,
-                    patience=10, device=None, verbose=True, random_seed=42):
+def timemixerpp_impu(mx, n_layers=2, d_model=None, d_ffn=128, top_k=5, 
+                     n_heads=4, n_kernels=6, dropout=0.1, epochs=100, batch_size=32, 
+                     patience=10, device=None, verbose=False, random_seed=42):
+    from pypots.imputation import TimeMixerPP
+    import numpy as np
+
     mx = mx.copy()
     np.random.seed(random_seed)
     n_steps, n_features = mx.shape
-    data_3d = mx[np.newaxis, :, :]  # 形状变为 (1, n_timesteps, n_features)
-    
-    if verbose:
-        print(f"原始数据形状: {mx.shape}")
-        print(f"转换后数据形状: {data_3d.shape}")
-        missing_rate = np.isnan(data_3d).sum() / data_3d.size
-        print(f"缺失率: {missing_rate:.2%}")
+    data_3d = mx[np.newaxis, :, :]  # (1, n_timesteps, n_features)
 
-    train_data = {
-        'X': data_3d.copy()
-    }
-    
+    downsampling_window = 2
+    downsampling_layers = 3
+
+    # 关键逻辑：确保 d_kv >= 1
+    d_time_model = max(1, n_steps // (downsampling_window ** downsampling_layers))
+    d_kv = max(1, d_time_model // n_heads)
+    if d_model is None:
+        d_model = max(4, d_kv * n_heads)
+
+    if verbose:
+        print(f"[TimeMixerPP] d_model={d_model}, d_kv={d_kv}, d_time_model={d_time_model}, n_heads={n_heads}")
+
+    train_data = {'X': data_3d.copy()}
+
     timemixer = TimeMixerPP(
         n_steps=n_steps,
         n_features=n_features,
@@ -236,27 +248,32 @@ def timemixerpp_impu(mx, n_layers=3, d_model=16, d_ffn=32, top_k=3,
         n_heads=n_heads,
         n_kernels=n_kernels,
         dropout=dropout,
-        epochs=epochs,
+        channel_mixing=True,
+        channel_independence=True,
+        downsampling_layers=downsampling_layers,
+        downsampling_window=downsampling_window,
+        apply_nonstationary_norm=False,
         batch_size=batch_size,
+        epochs=epochs,
         patience=patience,
         device=device,
-        verbose=verbose
+        verbose=verbose,
     )
-        
-    if verbose:
-        print("开始训练TimeMixerPP模型...")
+
     timemixer.fit(train_data)
-    if verbose:
-        print("训练完成，开始填补缺失值...")
     test_data = {'X': data_3d.copy()}
     imputed_data_3d = timemixer.predict(test_data)['imputation']
-    imputed_data = imputed_data_3d[0, :, :]  # 取出第一个样本，形状变为 (n_timesteps, n_features) 
-    if verbose:
-        print("缺失值填补完成！")
-        print(f"输出数据形状: {imputed_data.shape}")
+    imputed_data = imputed_data_3d[0, :, :]
     return imputed_data
 
-def tefn_impu(mx, epoch=10):
+
+
+
+def tefn_impu(mx, epoch=10, device=None):
+    from pypots.imputation import TEFN
+    from pypots.optim.adam import Adam
+    from pypots.nn.modules.loss import MAE, MSE
+    print("_____________4______________________")
     mx = mx.copy()
     n_steps, n_features = mx.shape
 
@@ -291,7 +308,7 @@ def tefn_impu(mx, epoch=10):
         training_loss=MAE,
         validation_metric=MSE,
         optimizer=Adam,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=device,
         saving_path=None,
         model_saving_strategy=None,
         verbose=False,

@@ -313,17 +313,17 @@ def regenerate_data_with_same_structure(beta, GC, T, sd, seed):
 # copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")
 # generate_sparse_matrix(50, 50, 3)
-extract_balanced_samples(
-    source_dir = "./ICU_Charts/",
-    label_file = "./static_tag.csv",
-    id_name = "ICUSTAY_ID",
-    label_name = "DIEINHOSPITAL",
-    target_dir = "./data/mimic",
-    num_pos = 1000,
-    num_neg = 1000,
-    random_state = 42
-)
-# generate_and_save_lorenz_datasets(num_datasets=10, p=50, T=30, output_dir="./data/lorenz", causality_dir="./causality_matrices")
+# extract_balanced_samples(
+#     source_dir = "./ICU_Charts/",
+#     label_file = "./static_tag.csv",
+#     id_name = "ICUSTAY_ID",
+#     label_name = "DIEINHOSPITAL",
+#     target_dir = "./data/mimic",
+#     num_pos = 1000,
+#     num_neg = 1000,
+#     random_state = 42
+# )
+generate_and_save_lorenz_datasets(num_datasets=1000, p=50, T=30, output_dir="./data/lorenz", causality_dir="./causality_matrices")
 # datasets = generate_var_datasets_with_fixed_structure(
 #         num_datasets=10,
 #         p=50,

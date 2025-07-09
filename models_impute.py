@@ -13,6 +13,7 @@ from sklearn.cluster import KMeans
 from models_TCDF import *
 from baseline import *
 from models_downstream import *
+
 def FirstProcess(matrix, threshold=0.8):
     df = pd.DataFrame(matrix)
     for column in df.columns:
@@ -241,7 +242,7 @@ def parallel_impute(file_path, causal_matrix, model_params, epochs=100, lr=0.01,
     
     for filename, result in results:
         successful_results.append(result)
-        pd.DataFrame(result).to_csv(f"./data_imputed/my_model/{filename}", index=False)
+        pd.DataFrame(result).to_csv(f"./data_imputed/my_model/lorenz/{filename}", index=False)
     
     print(f"成功填补 {len(successful_results)}/{len(file_list)} 个文件")
     return successful_results
@@ -299,6 +300,7 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
         if standard_cg is None:
             raise ValueError("standard_cg must be provided when isStandard is True")
         else:
+            standard_cg = pd.read_csv(standard_cg).values
             return standard_cg
 
     # Step 1: 预处理数据
@@ -365,352 +367,435 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
 
     return new_matrix
 
-def mse_evaluate(args):
-    """单个MSE评估任务函数，用于进程池"""
-    import tensorflow as tf
-    task_data, causal_matrix, gpu_id = args
+# def mse_evaluate(args):
+#     """单个MSE评估任务函数，用于进程池"""
+#     import tensorflow as tf
+#     task_data, causal_matrix, gpu_id = args
     
-    # # 在任何TensorFlow操作之前设置环境变量
-    # import os
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id) if gpu_id != 'cpu' else ""
-    os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+#     # # 在任何TensorFlow操作之前设置环境变量
+#     # import os
+#     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id) if gpu_id != 'cpu' else ""
+#     os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
     
-    # 配置TensorFlow
-    if gpu_id != 'cpu':
-        # 配置GPU内存增长
-        gpus = tf.config.experimental.list_physical_devices('GPU')
-        if gpus:
-            try:
-                # 在子进程中，只能看到一个GPU（由CUDA_VISIBLE_DEVICES设置）
-                tf.config.experimental.set_memory_growth(gpus[0], True)
-                print(f"[Worker {gpu_id}] TensorFlow配置GPU成功")
-            except RuntimeError as e:
-                print(f"[Worker {gpu_id}] TensorFlow GPU配置失败: {e}")
+#     # 配置TensorFlow
+#     if gpu_id != 'cpu':
+#         # 配置GPU内存增长
+#         gpus = tf.config.experimental.list_physical_devices('GPU')
+#         if gpus:
+#             try:
+#                 # 在子进程中，只能看到一个GPU（由CUDA_VISIBLE_DEVICES设置）
+#                 tf.config.experimental.set_memory_growth(gpus[0], True)
+#                 print(f"[Worker {gpu_id}] TensorFlow配置GPU成功")
+#             except RuntimeError as e:
+#                 print(f"[Worker {gpu_id}] TensorFlow GPU配置失败: {e}")
     
-    # 设置PyTorch GPU
-    if gpu_id != 'cpu' and torch.cuda.is_available():
-        torch.cuda.set_device(0)  # 在子进程中总是0（由环境变量控制）
-        device = torch.device('cuda:0')
-        print(f"[Worker {gpu_id}] PyTorch使用GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        device = torch.device('cpu')
-        print(f"[Worker {gpu_id}] 使用CPU")
+#     # 设置PyTorch GPU
+#     if gpu_id != 'cpu' and torch.cuda.is_available():
+#         torch.cuda.set_device(0)  # 在子进程中总是0（由环境变量控制）
+#         device = torch.device('cuda:0')
+#         print(f"[Worker {gpu_id}] PyTorch使用GPU: {torch.cuda.get_device_name(0)}")
+#     else:
+#         device = torch.device('cpu')
+#         print(f"[Worker {gpu_id}] 使用CPU")
     
-    try:
-        # 数据解包逻辑
-        if isinstance(task_data, tuple):
-            if len(task_data) == 2:
-                idx, data = task_data
-                if isinstance(data, tuple) and len(data) == 2:
-                    filename, matrix = data
-                    print(f"[Worker {gpu_id}] 处理文件 {filename}")
-                else:
-                    matrix = data
-                    print(f"[Worker {gpu_id}] 处理索引 {idx}")
-            else:
-                print(f"[Worker {gpu_id}] 意外的数据格式: {type(task_data)}, 长度: {len(task_data)}")
-                idx = 0
-                matrix = task_data[-1]
-        else:
-            idx = 0
-            matrix = task_data
-            print(f"[Worker {gpu_id}] 直接处理矩阵数据")
+#     try:
+#         # 数据解包逻辑
+#         if isinstance(task_data, tuple):
+#             if len(task_data) == 2:
+#                 idx, data = task_data
+#                 if isinstance(data, tuple) and len(data) == 2:
+#                     filename, matrix = data
+#                     print(f"[Worker {gpu_id}] 处理文件 {filename}")
+#                 else:
+#                     matrix = data
+#                     print(f"[Worker {gpu_id}] 处理索引 {idx}")
+#             else:
+#                 print(f"[Worker {gpu_id}] 意外的数据格式: {type(task_data)}, 长度: {len(task_data)}")
+#                 idx = 0
+#                 matrix = task_data[-1]
+#         else:
+#             idx = 0
+#             matrix = task_data
+#             print(f"[Worker {gpu_id}] 直接处理矩阵数据")
         
-        # 验证输入
-        if not isinstance(matrix, np.ndarray):
-            raise TypeError(f"期望numpy数组，得到{type(matrix)}")
-        if matrix.ndim != 2:
-            raise ValueError(f"期望二维矩阵，得到{matrix.ndim}维")
+#         # 验证输入
+#         if not isinstance(matrix, np.ndarray):
+#             raise TypeError(f"期望numpy数组，得到{type(matrix)}")
+#         if matrix.ndim != 2:
+#             raise ValueError(f"期望二维矩阵，得到{matrix.ndim}维")
         
-        # 执行MSE评估 - 传递实际的GPU设备ID
-        actual_gpu_id = 0 if gpu_id != 'cpu' else None
-        result = mse_evaluate_single_file(matrix, causal_matrix, device=device, tf_gpu_id=actual_gpu_id)
+#         # 执行MSE评估 - 传递实际的GPU设备ID
+#         actual_gpu_id = 0 if gpu_id != 'cpu' else None
+#         result = mse_evaluate_single_file(matrix, causal_matrix, device=device, tf_gpu_id=actual_gpu_id)
         
-        return idx, result
+#         return idx, result
         
-    except Exception as e:
-        import traceback
-        print(f"[Worker {gpu_id}] 评估任务失败: {e}")
-        print(traceback.format_exc())
-        return 0, None
+#     except Exception as e:
+#         import traceback
+#         print(f"[Worker {gpu_id}] 评估任务失败: {e}")
+#         print(traceback.format_exc())
+#         return 0, None
 
-def mse_evaluate_single_file(mx, causal_matrix, device=None, tf_gpu_id=None):
-    """安全的MSE评估函数，避免TensorFlow设备冲突"""
-    if device is None:
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+# def mse_evaluate_single_file(mx, causal_matrix, device=None, tf_gpu_id=None):
+#     """安全的MSE评估函数，避免TensorFlow设备冲突"""
+#     if device is None:
+#         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
-    gpu_id = tf_gpu_id if tf_gpu_id is not None else 0
+#     gpu_id = tf_gpu_id if tf_gpu_id is not None else 0
     
-    ground_truth = mx.copy()
-    X_block_3d = block_missing(mx[np.newaxis, ...], factor=0.1, block_width=3, block_len=3)
-    X_block = X_block_3d[0]
+#     ground_truth = mx.copy()
+#     X_block_3d = block_missing(mx[np.newaxis, ...], factor=0.1, block_width=3, block_len=3)
+#     X_block = X_block_3d[0]
 
-    def mse_pytorch(a, b):
-        """使用PyTorch计算MSE"""
-        try:
-            if isinstance(a, np.ndarray):
-                a_tensor = torch.from_numpy(a).float()
-            else:
-                a_tensor = a.float()
+#     def mse_pytorch(a, b):
+#         """使用PyTorch计算MSE"""
+#         try:
+#             if isinstance(a, np.ndarray):
+#                 a_tensor = torch.from_numpy(a).float()
+#             else:
+#                 a_tensor = a.float()
                 
-            if isinstance(b, np.ndarray):
-                b_tensor = torch.from_numpy(b).float()
-            else:
-                b_tensor = b.float()
+#             if isinstance(b, np.ndarray):
+#                 b_tensor = torch.from_numpy(b).float()
+#             else:
+#                 b_tensor = b.float()
             
-            # 分批处理避免内存问题
-            if a_tensor.numel() > 500000:
-                batch_size = 100000
-                total_loss = 0
-                total_elements = 0
+#             # 分批处理避免内存问题
+#             if a_tensor.numel() > 500000:
+#                 batch_size = 100000
+#                 total_loss = 0
+#                 total_elements = 0
                 
-                a_flat = a_tensor.view(-1)
-                b_flat = b_tensor.view(-1)
+#                 a_flat = a_tensor.view(-1)
+#                 b_flat = b_tensor.view(-1)
                 
-                for i in range(0, a_flat.numel(), batch_size):
-                    end_idx = min(i + batch_size, a_flat.numel())
-                    a_batch = a_flat[i:end_idx].to(device)
-                    b_batch = b_flat[i:end_idx].to(device)
+#                 for i in range(0, a_flat.numel(), batch_size):
+#                     end_idx = min(i + batch_size, a_flat.numel())
+#                     a_batch = a_flat[i:end_idx].to(device)
+#                     b_batch = b_flat[i:end_idx].to(device)
                     
-                    batch_loss = F.mse_loss(a_batch, b_batch, reduction='sum')
-                    total_loss += batch_loss.cpu().item()
-                    total_elements += a_batch.numel()
+#                     batch_loss = F.mse_loss(a_batch, b_batch, reduction='sum')
+#                     total_loss += batch_loss.cpu().item()
+#                     total_elements += a_batch.numel()
                     
-                    del a_batch, b_batch, batch_loss
-                    if device.type == 'cuda':
-                        torch.cuda.empty_cache()
+#                     del a_batch, b_batch, batch_loss
+#                     if device.type == 'cuda':
+#                         torch.cuda.empty_cache()
                 
-                return total_loss / total_elements
-            else:
-                a_tensor = a_tensor.to(device)
-                b_tensor = b_tensor.to(device)
-                result = F.mse_loss(a_tensor, b_tensor).cpu().item()
+#                 return total_loss / total_elements
+#             else:
+#                 a_tensor = a_tensor.to(device)
+#                 b_tensor = b_tensor.to(device)
+#                 result = F.mse_loss(a_tensor, b_tensor).cpu().item()
                 
-                del a_tensor, b_tensor
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
+#                 del a_tensor, b_tensor
+#                 if device.type == 'cuda':
+#                     torch.cuda.empty_cache()
                 
-                return result
+#                 return result
                 
-        except Exception as e:
-            print(f"MSE计算失败: {e}")
-            return float('inf')
+#         except Exception as e:
+#             print(f"MSE计算失败: {e}")
+#             return float('inf')
 
-    results = {}
+#     results = {}
     
-    # 1. 我们的方法
-    try:
-        print(f"[GPU {gpu_id}] 评估我们的方法...")
-        imputed = impute(
-            X_block, causal_matrix,
-            model_params={'num_levels': 6, 'kernel_size': 6, 'dilation_c': 4},
-            epochs=50, lr=0.01, gpu_id=gpu_id
-        )
-        results['my_model'] = mse_pytorch(imputed, ground_truth)
-        print(f"✅ 我们的方法 MSE: {results['my_model']:.6f}")
-        del imputed
-    except Exception as e:
-        print(f"❌ 我们的方法失败: {e}")
-        results['my_model'] = float('inf')
+#     # 1. 我们的方法
+#     try:
+#         print(f"[GPU {gpu_id}] 评估我们的方法...")
+#         imputed = impute(
+#             X_block, causal_matrix,
+#             model_params={'num_levels': 6, 'kernel_size': 6, 'dilation_c': 4},
+#             epochs=50, lr=0.01, gpu_id=gpu_id
+#         )
+#         results['my_model'] = mse_pytorch(imputed, ground_truth)
+#         print(f"✅ 我们的方法 MSE: {results['my_model']:.6f}")
+#         del imputed
+#     except Exception as e:
+#         print(f"❌ 我们的方法失败: {e}")
+#         results['my_model'] = float('inf')
     
-    # 2. 简单基线方法
-    simple_methods = [
-        ('zero_impu', zero_impu),
-        ('mean_impu', mean_impu), 
-        ('median_impu', median_impu),
-        ('mode_impu', mode_impu),
-        ('random_impu', random_impu),
-        ('knn_impu', knn_impu),
-        ('ffill_impu', ffill_impu),
-        ('bfill_impu', bfill_impu),
-    ]
+#     # 2. 简单基线方法
+#     simple_methods = [
+#         ('zero_impu', zero_impu),
+#         ('mean_impu', mean_impu), 
+#         ('median_impu', median_impu),
+#         ('mode_impu', mode_impu),
+#         ('random_impu', random_impu),
+#         ('knn_impu', knn_impu),
+#         ('ffill_impu', ffill_impu),
+#         ('bfill_impu', bfill_impu),
+#     ]
     
-    for method_name, method_func in simple_methods:
-        try:
-            result = method_func(X_block)
-            results[method_name] = mse_pytorch(result, ground_truth)
-            del result
-        except Exception as e:
-            print(f"❌ {method_name} 失败: {e}")
-            results[method_name] = float('inf')
+#     for method_name, method_func in simple_methods:
+#         try:
+#             result = method_func(X_block)
+#             results[method_name] = mse_pytorch(result, ground_truth)
+#             del result
+#         except Exception as e:
+#             print(f"❌ {method_name} 失败: {e}")
+#             results[method_name] = float('inf')
     
-    # 3. TensorFlow方法 - 使用全局配置
-    tf_methods = [
-        ('miracle_impu', miracle_impu),
-        ('saits_impu', saits_impu),
-        ('timemixerpp_impu', timemixerpp_impu),
+#     # 3. TensorFlow方法 - 使用全局配置
+#     tf_methods = [
+#         ('miracle_impu', miracle_impu),
+#         ('saits_impu', saits_impu),
+#         ('timemixerpp_impu', timemixerpp_impu),
+#         ('tefn_impu', tefn_impu),
+#     ]
+    
+#     import tensorflow as tf
+    
+#     # 创建单一的TensorFlow配置
+#     config = tf.compat.v1.ConfigProto()
+#     config.gpu_options.allow_growth = True
+#     if device.type == 'cuda':
+#         config.gpu_options.visible_device_list = "0"  # 子进程中总是使用第一个可见GPU
+    
+#     for method_name, method_func in tf_methods:
+#         try:
+#             print(f"🔄 [GPU {gpu_id}] 评估 {method_name}...")
+            
+#             # 使用统一的会话配置
+#             with tf.compat.v1.Session(config=config) as sess:
+#                 result = method_func(X_block)
+#                 results[method_name] = mse_pytorch(result, ground_truth)
+#                 print(f"✅ {method_name} MSE: {results[method_name]:.6f}")
+#                 del result
+                
+#         except Exception as e:
+#             print(f"❌ {method_name} 失败: {e}")
+#             results[method_name] = float('inf')
+#         finally:
+#             # 清理资源
+#             if device.type == 'cuda':
+#                 torch.cuda.empty_cache()
+    
+#     return results
+
+# def parallel_mse_evaluate(res_list, causal_matrix, max_workers=None):
+#     """使用进程池的并行MSE评估，与parallel_impute相同的模式"""
+    
+#     # 确定工作进程数和GPU分配
+#     num_gpus = torch.cuda.device_count()
+#     if num_gpus == 0:
+#         max_workers = max_workers or os.cpu_count()
+#         gpu_ids = ['cpu'] * len(res_list)
+#         print(f"使用 {max_workers} 个CPU进程处理 {len(res_list)} 个MSE评估任务")
+#     else:
+#         # 每个GPU运行2个进程以提高利用率
+#         max_workers = max_workers or (num_gpus * 2)
+#         gpu_ids = [i % num_gpus for i in range(len(res_list))]
+#         print(f"使用 {max_workers} 个进程，{num_gpus} 个GPU并行处理 {len(res_list)} 个MSE评估任务")
+    
+#     # 准备参数列表 - 简化数据结构
+#     args_list = []
+#     for i, matrix in enumerate(res_list):
+#         # 简化：直接传递 (索引, 矩阵) 的格式
+#         task_data = (i, matrix)
+#         args_list.append((task_data, causal_matrix, gpu_ids[i]))
+    
+#     print(f"准备处理 {len(args_list)} 个MSE评估任务")
+    
+#     # 并行执行
+#     with Pool(processes=max_workers) as pool:
+#         results_raw = list(tqdm(
+#             pool.imap(mse_evaluate, args_list),
+#             total=len(res_list),
+#             desc="MSE评估中",
+#             ncols=80
+#         ))
+    
+#     # 按索引排序结果
+#     results = [None] * len(res_list)
+#     for idx, result in results_raw:
+#         if idx < len(results):
+#             results[idx] = result
+    
+#     # 处理结果统计 - 专门调试TimeMixerPP
+#     valid_mse_dicts = [d for d in results if d is not None and isinstance(d, dict)]
+    
+#     if not valid_mse_dicts:
+#         print("错误: 所有MSE评估任务均失败!")
+#         return None
+#     else:
+#         print(f"成功完成 {len(valid_mse_dicts)}/{len(results)} 个MSE评估")
+        
+#         # 特别调试TimeMixerPP的所有结果
+#         print("\n🔍 TimeMixerPP 详细结果分析:")
+#         timemixer_values = []
+#         for i, d in enumerate(valid_mse_dicts):
+#             if d is not None and 'timemixerpp_impu' in d:
+#                 value = d['timemixerpp_impu']
+#                 timemixer_values.append((i, value))
+#                 if np.isinf(value):
+#                     print(f"  任务 {i}: {value} ⚠️ INF")
+#                 elif value > 1e6:
+#                     print(f"  任务 {i}: {value:.2e} ⚠️ 极大值")
+#                 else:
+#                     print(f"  任务 {i}: {value:.6f} ✅")
+        
+#         print(f"\nTimeMixerPP 统计:")
+#         values_only = [v for _, v in timemixer_values]
+#         finite_values = [v for v in values_only if not np.isinf(v) and not np.isnan(v)]
+#         inf_count = sum(1 for v in values_only if np.isinf(v))
+        
+#         print(f"  - 总任务数: {len(values_only)}")
+#         print(f"  - 有限值数量: {len(finite_values)}")
+#         print(f"  - inf 值数量: {inf_count}")
+        
+#         if finite_values:
+#             print(f"  - 有限值范围: [{min(finite_values):.6f}, {max(finite_values):.6f}]")
+#             print(f"  - 有限值平均: {sum(finite_values)/len(finite_values):.6f}")
+        
+#         # 计算所有方法的平均MSE
+#         avg_mse = {}
+#         for method in tqdm(valid_mse_dicts[0].keys(), desc="计算平均 MSE"):
+#             vals = []
+#             inf_count = 0
+#             large_count = 0  # 极大值计数
+            
+#             for d in valid_mse_dicts:
+#                 if d is not None and method in d:
+#                     value = d[method]
+#                     if isinstance(value, (int, float)) and not isinstance(value, bool):
+#                         if np.isinf(value):
+#                             inf_count += 1
+#                         elif value > 1e10:  # 极大值阈值
+#                             large_count += 1
+#                             print(f"⚠️ {method} 发现极大值: {value:.2e}")
+#                         elif not np.isnan(value):
+#                             vals.append(float(value))
+            
+#             # 特别处理TimeMixerPP
+#             if method == 'timemixerpp_impu':
+#                 print(f"\n{method} 最终统计:")
+#                 print(f"  - 正常值: {len(vals)} 个")
+#                 print(f"  - inf值: {inf_count} 个")
+#                 print(f"  - 极大值: {large_count} 个")
+                
+#                 if len(vals) > 0:
+#                     avg_val = sum(vals) / len(vals)
+#                     print(f"  - 正常值平均: {avg_val:.6f}")
+                    
+#                     # 如果有inf或极大值，只用正常值计算平均
+#                     if inf_count > 0 or large_count > 0:
+#                         print(f"  - 忽略异常值，使用正常值平均")
+#                         avg_mse[method] = avg_val
+#                     else:
+#                         # 计算总平均（包括可能的极值）
+#                         all_finite_vals = vals.copy()
+#                         total_avg = sum(all_finite_vals) / len(all_finite_vals) if all_finite_vals else float('inf')
+#                         avg_mse[method] = total_avg
+#                 else:
+#                     avg_mse[method] = float('inf')
+#             else:
+#                 # 其他方法的正常处理
+#                 if len(vals) > 0:
+#                     avg_mse[method] = sum(vals) / len(vals)
+#                 else:
+#                     avg_mse[method] = float('inf')
+            
+#             print(f"方法 {method}: {len(vals)} 个有效值，平均 MSE = {avg_mse[method]}")
+        
+#         # 输出结果
+#         print("\n各方法平均 MSE:")
+#         print("-" * 40)
+#         for method, v in sorted(avg_mse.items()):
+#             if not np.isnan(v):
+#                 print(f"{method:20s}: {v:.6f}")
+#             else:
+#                 print(f"{method:20s}: 无有效结果")
+        
+#         # 保存结果
+#         results_df = pd.DataFrame([
+#             {'Method': method, 'Average_MSE': v} 
+#             for method, v in sorted(avg_mse.items())
+#         ])
+#         results_df.to_csv('mse_evaluation_results.csv', index=False)
+#         print(f"\n结果已保存到: mse_evaluation_results.csv")
+        
+#         return avg_mse
+# ================================
+# 1. 单文件评估函数
+# ================================
+def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    gt = mx.copy()
+    X = block_missing(mx[np.newaxis, ...], factor=0.1, block_width=3, block_len=3)[0]
+
+    def mse(a, b): 
+        a = torch.as_tensor(a, dtype=torch.float32, device=device) 
+        b = torch.as_tensor(b, dtype=torch.float32, device=device) 
+        return F.mse_loss(a, b).item()
+
+    res = {}
+    res['my_model'] = mse(
+        impute(X, causal_matrix,
+               model_params={'num_levels': 6, 'kernel_size': 6, 'dilation_c': 4},
+               epochs=50, lr=0.01, gpu_id=gpu_id),
+        gt
+    )
+
+    baseline = [
+        ('zero_impu', zero_impu), ('mean_impu', mean_impu),
+        ('median_impu', median_impu), ('mode_impu', mode_impu),
+        ('random_impu', random_impu), ('knn_impu', knn_impu),
+        ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
+        ('miracle_impu', miracle_impu), ('saits_impu', saits_impu),
+        # ('timemixerpp_impu', timemixerpp_impu), 
         ('tefn_impu', tefn_impu),
     ]
-    
-    import tensorflow as tf
-    
-    # 创建单一的TensorFlow配置
-    config = tf.compat.v1.ConfigProto()
-    config.gpu_options.allow_growth = True
-    if device.type == 'cuda':
-        config.gpu_options.visible_device_list = "0"  # 子进程中总是使用第一个可见GPU
-    
-    for method_name, method_func in tf_methods:
-        try:
-            print(f"🔄 [GPU {gpu_id}] 评估 {method_name}...")
-            
-            # 使用统一的会话配置
-            with tf.compat.v1.Session(config=config) as sess:
-                result = method_func(X_block)
-                results[method_name] = mse_pytorch(result, ground_truth)
-                print(f"✅ {method_name} MSE: {results[method_name]:.6f}")
-                del result
-                
-        except Exception as e:
-            print(f"❌ {method_name} 失败: {e}")
-            results[method_name] = float('inf')
-        finally:
-            # 清理资源
-            if device.type == 'cuda':
-                torch.cuda.empty_cache()
-    
-    return results
 
-def parallel_mse_evaluate(res_list, causal_matrix, max_workers=None):
-    """使用进程池的并行MSE评估，与parallel_impute相同的模式"""
+    for name, fn in baseline:
+        res[name] = mse(fn(X), gt)
+
+    return res
+
+# ================================
+# 2. 用于 Pool 的包装函数（每个任务）
+# ================================
+def worker_wrapper(args):
+    idx, mx, causal_matrix, gpu_id = args
     
-    # 确定工作进程数和GPU分配
+    # 设置环境变量
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    
+    # 确保PyTorch使用正确的设备
+    if torch.cuda.is_available():
+        torch.cuda.set_device(0)  # 在子进程中，GPU 0就是分配给的GPU
+        device = torch.device('cuda:0')
+    else:
+        device = torch.device('cpu')
+    
+    # 传递正确的设备
+    res = mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=device)  # ← 这里改为0
+    return idx, res
+
+# ================================
+# 3. 并行调度函数（进程池实现）
+# ================================
+def parallel_mse_evaluate(res_list, causal_matrix):
     num_gpus = torch.cuda.device_count()
+
     if num_gpus == 0:
-        max_workers = max_workers or os.cpu_count()
-        gpu_ids = ['cpu'] * len(res_list)
-        print(f"使用 {max_workers} 个CPU进程处理 {len(res_list)} 个MSE评估任务")
-    else:
-        # 每个GPU运行2个进程以提高利用率
-        max_workers = max_workers or (num_gpus * 2)
-        gpu_ids = [i % num_gpus for i in range(len(res_list))]
-        print(f"使用 {max_workers} 个进程，{num_gpus} 个GPU并行处理 {len(res_list)} 个MSE评估任务")
-    
-    # 准备参数列表 - 简化数据结构
-    args_list = []
-    for i, matrix in enumerate(res_list):
-        # 简化：直接传递 (索引, 矩阵) 的格式
-        task_data = (i, matrix)
-        args_list.append((task_data, causal_matrix, gpu_ids[i]))
-    
-    print(f"准备处理 {len(args_list)} 个MSE评估任务")
-    
-    # 并行执行
-    with Pool(processes=max_workers) as pool:
-        results_raw = list(tqdm(
-            pool.imap(mse_evaluate, args_list),
-            total=len(res_list),
-            desc="MSE评估中",
-            ncols=80
-        ))
-    
-    # 按索引排序结果
-    results = [None] * len(res_list)
-    for idx, result in results_raw:
-        if idx < len(results):
-            results[idx] = result
-    
-    # 处理结果统计 - 专门调试TimeMixerPP
-    valid_mse_dicts = [d for d in results if d is not None and isinstance(d, dict)]
-    
-    if not valid_mse_dicts:
-        print("错误: 所有MSE评估任务均失败!")
-        return None
-    else:
-        print(f"成功完成 {len(valid_mse_dicts)}/{len(results)} 个MSE评估")
-        
-        # 特别调试TimeMixerPP的所有结果
-        print("\n🔍 TimeMixerPP 详细结果分析:")
-        timemixer_values = []
-        for i, d in enumerate(valid_mse_dicts):
-            if d is not None and 'timemixerpp_impu' in d:
-                value = d['timemixerpp_impu']
-                timemixer_values.append((i, value))
-                if np.isinf(value):
-                    print(f"  任务 {i}: {value} ⚠️ INF")
-                elif value > 1e6:
-                    print(f"  任务 {i}: {value:.2e} ⚠️ 极大值")
-                else:
-                    print(f"  任务 {i}: {value:.6f} ✅")
-        
-        print(f"\nTimeMixerPP 统计:")
-        values_only = [v for _, v in timemixer_values]
-        finite_values = [v for v in values_only if not np.isinf(v) and not np.isnan(v)]
-        inf_count = sum(1 for v in values_only if np.isinf(v))
-        
-        print(f"  - 总任务数: {len(values_only)}")
-        print(f"  - 有限值数量: {len(finite_values)}")
-        print(f"  - inf 值数量: {inf_count}")
-        
-        if finite_values:
-            print(f"  - 有限值范围: [{min(finite_values):.6f}, {max(finite_values):.6f}]")
-            print(f"  - 有限值平均: {sum(finite_values)/len(finite_values):.6f}")
-        
-        # 计算所有方法的平均MSE
-        avg_mse = {}
-        for method in tqdm(valid_mse_dicts[0].keys(), desc="计算平均 MSE"):
-            vals = []
-            inf_count = 0
-            large_count = 0  # 极大值计数
-            
-            for d in valid_mse_dicts:
-                if d is not None and method in d:
-                    value = d[method]
-                    if isinstance(value, (int, float)) and not isinstance(value, bool):
-                        if np.isinf(value):
-                            inf_count += 1
-                        elif value > 1e10:  # 极大值阈值
-                            large_count += 1
-                            print(f"⚠️ {method} 发现极大值: {value:.2e}")
-                        elif not np.isnan(value):
-                            vals.append(float(value))
-            
-            # 特别处理TimeMixerPP
-            if method == 'timemixerpp_impu':
-                print(f"\n{method} 最终统计:")
-                print(f"  - 正常值: {len(vals)} 个")
-                print(f"  - inf值: {inf_count} 个")
-                print(f"  - 极大值: {large_count} 个")
-                
-                if len(vals) > 0:
-                    avg_val = sum(vals) / len(vals)
-                    print(f"  - 正常值平均: {avg_val:.6f}")
-                    
-                    # 如果有inf或极大值，只用正常值计算平均
-                    if inf_count > 0 or large_count > 0:
-                        print(f"  - 忽略异常值，使用正常值平均")
-                        avg_mse[method] = avg_val
-                    else:
-                        # 计算总平均（包括可能的极值）
-                        all_finite_vals = vals.copy()
-                        total_avg = sum(all_finite_vals) / len(all_finite_vals) if all_finite_vals else float('inf')
-                        avg_mse[method] = total_avg
-                else:
-                    avg_mse[method] = float('inf')
-            else:
-                # 其他方法的正常处理
-                if len(vals) > 0:
-                    avg_mse[method] = sum(vals) / len(vals)
-                else:
-                    avg_mse[method] = float('inf')
-            
-            print(f"方法 {method}: {len(vals)} 个有效值，平均 MSE = {avg_mse[method]}")
-        
-        # 输出结果
-        print("\n各方法平均 MSE:")
-        print("-" * 40)
-        for method, v in sorted(avg_mse.items()):
-            if not np.isnan(v):
-                print(f"{method:20s}: {v:.6f}")
-            else:
-                print(f"{method:20s}: 无有效结果")
-        
-        # 保存结果
-        results_df = pd.DataFrame([
-            {'Method': method, 'Average_MSE': v} 
-            for method, v in sorted(avg_mse.items())
-        ])
-        results_df.to_csv('mse_evaluation_results.csv', index=False)
-        print(f"\n结果已保存到: mse_evaluation_results.csv")
-        
-        return avg_mse
+        all_res = [mse_evaluate_single_file(x, causal_matrix)
+                   for x in tqdm(res_list, desc="CPU")]
+        return {k: float(np.mean([d[k] for d in all_res]))
+                for k in all_res[0]}
+
+    print(f"[INFO] 使用 {num_gpus} 个 GPU 并行评估")
+    args_list = [(i, res_list[i], causal_matrix, i % num_gpus) for i in range(len(res_list))]
+
+    with mp.Pool(processes=num_gpus) as pool:
+        results = list(tqdm(pool.imap(worker_wrapper, args_list), total=len(args_list), desc="All‑tasks"))
+
+    results.sort(key=lambda x: x[0])  # 恢复顺序
+    only_result_dicts = [res for _, res in results]
+
+    avg = {k: float(np.mean([r[k] for r in only_result_dicts])) for k in only_result_dicts[0]}
+    pd.DataFrame([{'Method': k, 'Average_MSE': v} for k, v in avg.items()]) \
+        .to_csv("mse_evaluation_results.csv", index=False)
+    return avg

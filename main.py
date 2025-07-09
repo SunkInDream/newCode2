@@ -17,14 +17,14 @@ model_params = {
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
-    data_arr = Prepare_data('./data/mimic')
-    cg = causal_discovery(data_arr, 4)
+    data_arr = Prepare_data('./data/lorenz')
+    cg = causal_discovery(data_arr, 4, isStandard=True, standard_cg='./causality_matrices/lorenz_causality_matrix.csv')
     
-    res = parallel_impute('./data/mimic', cg, model_params, epochs=150, lr=0.02)
-    parallel_mse_evaluate(res, cg)
+    # res = parallel_impute('./data/lorenz', cg, model_params, epochs=150, lr=0.02)
+    parallel_mse_evaluate(data_arr, cg)
     
-    data_arr1, label_arr1 = Prepare_data('./data/mimic', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
-    results = evaluate_downstream(data_arr1, label_arr1, k=4, epochs=100, lr=0.02)
+    # data_arr1, label_arr1 = Prepare_data('./data/mimic', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
+    # results = evaluate_downstream(data_arr1, label_arr1, k=4, epochs=100, lr=0.02)
 
     
 
