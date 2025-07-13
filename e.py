@@ -58,6 +58,19 @@ def simulate_lorenz_96(p, T, F=10.0, delta_t=0.1, sd=0.1, burn_in=1000,
     X = odeint(lorenz, x0, t, args=(F,))
     X += np.random.normal(scale=sd, size=(T + burn_in, p))
 
+    # ✅ 添加线性缩放到0-100范围
+    X_scaled = X[burn_in:, :]  # 先去掉burn_in部分
+    
+    # 找到整个矩阵的最小值和最大值
+    min_val = np.min(X_scaled)
+    max_val = np.max(X_scaled)
+    
+    # 线性缩放到0-100范围
+    if max_val != min_val:  # 避免除零错误
+        X_scaled = (X_scaled - min_val) / (max_val - min_val) * 100
+    else:
+        X_scaled = np.full_like(X_scaled, 50)  # 如果所有值相同，设为50
+    
     # Set up Granger causality ground truth.
     GC = np.zeros((p, p), dtype=int)
     for i in range(p):
@@ -66,7 +79,7 @@ def simulate_lorenz_96(p, T, F=10.0, delta_t=0.1, sd=0.1, burn_in=1000,
         GC[i, (i - 1) % p] = 1
         GC[i, (i - 2) % p] = 1
 
-    return X[burn_in:, :], GC
+    return X_scaled, GC
 def generate_multiple_lorenz_datasets(num_datasets, p, T, seed_start=0):
     datasets = []
     for i in range(num_datasets):
@@ -307,7 +320,18 @@ def regenerate_data_with_same_structure(beta, GC, T, sd, seed):
         X[:, t] += errors[:, t-1]
     
     data = X.T[burn_in:, :]
-    return data
+    
+    # ✅ 添加线性缩放到1-100范围
+    min_val = np.min(data)
+    max_val = np.max(data)
+    
+    # 线性缩放到1-100范围
+    if max_val != min_val:  # 避免除零错误
+        data_scaled = (data - min_val) / (max_val - min_val) * 99 + 1
+    else:
+        data_scaled = np.full_like(data, 50.5)  # 如果所有值相同，设为中间值
+    
+    return data_scaled
 
 
 # copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
@@ -321,20 +345,20 @@ def regenerate_data_with_same_structure(beta, GC, T, sd, seed):
 #     target_dir = "./data/mimic",
 #     num_pos = 1000,
 #     num_neg = 1000,
-#     random_state = 42
+#     random_state = 33
 # )
-generate_and_save_lorenz_datasets(num_datasets=1000, p=50, T=30, output_dir="./data/lorenz", causality_dir="./causality_matrices")
-# datasets = generate_var_datasets_with_fixed_structure(
-#         num_datasets=10,
-#         p=50,
-#         T=30, 
-#         lag=2,
-#         output_dir="./data/var",          # 时间序列数据保存目录
-#         causality_dir="./causality_matrices", # 因果矩阵保存目录
-#         sparsity=0.3,
-#         beta_value=0.5,
-#         auto_corr=0.8,
-#         sd=0.1,
-#         master_seed=42
-#     )
+# generate_and_save_lorenz_datasets(num_datasets=12, p=100, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
+datasets = generate_var_datasets_with_fixed_structure(
+        num_datasets=12,
+        p=50,
+        T=50, 
+        lag=4,
+        output_dir="./data/var",          # 时间序列数据保存目录
+        causality_dir="./causality_matrices", # 因果矩阵保存目录
+        sparsity=0.3,
+        beta_value=0.3,
+        auto_corr=0.6,
+        sd=0.3,
+        master_seed=33
+    )
     

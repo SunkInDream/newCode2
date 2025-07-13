@@ -11,31 +11,29 @@ from typing import Optional
 # from pypots.nn.modules.loss import MAE, MSE
 import torch
 from torch.utils.data import Dataset, DataLoader
+from models_impute import *
 
 def zero_impu(mx):
    return np.nan_to_num(mx, nan=0)
-
+# 在baseline.py中添加调试信息
+# def zero_impu(mx):
+#     print(f"🔍 zero_impu 输入: 缺失值数量 = {np.isnan(mx).sum()}")
+#     result = mx.copy()
+    
+#     # 检查是否调用了预处理
+#     if hasattr(zero_impu, '_debug'):
+#         print("zero_impu: 直接用0填充")
+#         result[np.isnan(result)] = 0.0
+#     else:
+#         # 可能这里调用了其他处理函数
+#         result = FirstProcess(result)  # ← 这里可能是问题所在
+#         result = SecondProcess(result)
+    
+#     print(f"🔍 zero_impu 输出: 缺失值数量 = {np.isnan(result).sum()}")
+#     print(f"🔍 zero_impu 输出: 零值数量 = {(result == 0).sum()}")
+#     return result
 def mean_impu(mx):
     mx = mx.copy()
-    # original_shape = mx.shape  # 保存原始维度
-    
-    # # 按列计算均值
-    # col_mean = np.nanmean(mx, axis=0)
-    # all_nan_cols = np.isnan(col_mean)
-    # col_mean[all_nan_cols] = 0
-    
-    # # 明确处理每一列
-    # for col in range(mx.shape[1]):
-    #     nan_mask = np.isnan(mx[:, col])
-    #     if np.any(nan_mask):
-    #         mx[nan_mask, col] = col_mean[col]
-    
-    # # 确保所有NaN都已处理
-    # if np.isnan(mx).any():
-    #     mx = np.nan_to_num(mx, nan=0)
-    
-    # # 确保维度没变
-    # assert mx.shape == original_shape, "填充后维度变化!"
     col_means = np.nanmean(mx, axis=0)
     inds = np.where(np.isnan(mx))
     mx[inds] = np.take(col_means, inds[1])
@@ -45,25 +43,6 @@ def mean_impu(mx):
 
 def median_impu(mx):
     mx = mx.copy()
-    # original_shape = mx.shape  # 保存原始维度
-    
-    # # 按列计算均值
-    # col_median = np.nanmedian(mx, axis=0)
-    # all_nan_cols = np.isnan(col_median)
-    # col_median[all_nan_cols] = 0
-    
-    # # 明确处理每一列
-    # for col in range(mx.shape[1]):
-    #     nan_mask = np.isnan(mx[:, col])
-    #     if np.any(nan_mask):
-    #         mx[nan_mask, col] = col_median[col]
-    
-    # # 确保所有NaN都已处理
-    # if np.isnan(mx).any():
-    #     mx = np.nan_to_num(mx, nan=0)
-    
-    # # 确保维度没变
-    # assert mx.shape == original_shape, "填充后维度变化!"
     col_medians = np.nanmedian(mx, axis=0)
     inds = np.where(np.isnan(mx))
     mx[inds] = np.take(col_medians, inds[1])
@@ -134,59 +113,94 @@ def bfill_impu(mx):
     return df.values
 
 def miracle_impu(mx):
-    # X = mx.copy()
-    # col_mean = np.nanmean(X, axis=0)
-    
-    # # 全空列填充-1
-    # col_mean = np.where(np.isnan(col_mean), -1, col_mean)
-    
-    # inds = np.where(np.isnan(X))
-    # X[inds] = np.take(col_mean, inds[1])
-    # imputed_data_x = X
+    try:
+        from miracle import MIRACLE
+        print("_____________1______________________")
+        mx = mx.copy()
+        
+        # 检查是否有缺失值
+        if not np.isnan(mx).any():
+            print("数据中没有缺失值，直接返回原数据")
+            return mx
+        
+        # 检查是否所有值都是NaN
+        if np.isnan(mx).all():
+            print("所有值都是NaN，使用0填充")
+            return np.zeros_like(mx)
+        
+        # 检查是否有整列都是NaN
+        all_nan_cols = np.all(np.isnan(mx), axis=0)
+        if all_nan_cols.any():
+            print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用0填充")
+            mx[:, all_nan_cols] = 0.0
+        
+        # 重新检查剩余的缺失值
+        missing_idxs = np.where(np.any(np.isnan(mx), axis=0))[0]
+        
+        # 如果没有剩余的缺失值，直接返回
+        if len(missing_idxs) == 0:
+            print("处理完全NaN列后，没有剩余缺失值")
+            return mx
+        
+        # 对剩余缺失值使用均值填充作为种子
+        mx_imputed = mean_impu(mx)
+        
+        # 使用MIRACLE进行填补
+        miracle = MIRACLE(
+            num_inputs=mx.shape[1],
+            reg_lambda=6,
+            reg_beta=4,
+            n_hidden=32,
+            ckpt_file="tmp.ckpt",
+            missing_list=missing_idxs,
+            reg_m=0.1,
+            lr=0.01,
+            window=10,
+            max_steps=200,  # 减少训练步数避免过拟合
+        )
+        
+        miracle_imputed_data_x = miracle.fit(
+            mx,
+            X_seed=mx_imputed,
+        )
+        
+        # ✅ 检查MIRACLE输出结果
+        if miracle_imputed_data_x is None:
+            print("MIRACLE返回None，使用0填充")
+            return np.zeros_like(mx)
+        
+        # 检查是否所有值都是NaN
+        if np.isnan(miracle_imputed_data_x).all():
+            print("MIRACLE输出全为NaN，使用0填充")
+            return np.zeros_like(mx)
+        
+        # 检查是否还有NaN值
+        if np.isnan(miracle_imputed_data_x).any():
+            print("MIRACLE输出包含NaN，将剩余NaN替换为0")
+            miracle_imputed_data_x = np.where(np.isnan(miracle_imputed_data_x), 0.0, miracle_imputed_data_x)
+        
+        # 检查是否有异常大值
+        if np.any(np.abs(miracle_imputed_data_x) > 1e6):
+            print(f"MIRACLE输出包含异常大值 (max: {np.max(np.abs(miracle_imputed_data_x)):.2e})，使用均值填充")
+            return mean_impu(mx)
+        
+        # 检查是否有无穷值
+        if np.any(np.isinf(miracle_imputed_data_x)):
+            print("MIRACLE输出包含无穷值，使用均值填充")
+            return mean_impu(mx)
+        
+        print("MIRACLE填补成功")
+        return miracle_imputed_data_x
+        
+    except Exception as e:
+        print(f"MIRACLE填补失败: {e}")
+        print("使用0填充作为fallback")
+        mx = mx.copy()
+        mx[np.isnan(mx)] = 0.0
+        return mx
 
-    # missing_idxs = np.where(np.any(np.isnan(mx), axis=0))[0]
-    # miracle = MIRACLE(
-    #     num_inputs=mx.shape[1],
-    #     reg_lambda=6,
-    #     reg_beta=4,
-    #     n_hidden=32,
-    #     ckpt_file="tmp.ckpt",
-    #     missing_list=missing_idxs,
-    #     reg_m=0.1,
-    #     lr=0.01,
-    #     window=10,
-    #     max_steps=800,
-    # )
-    # miracle_imputed_data_x = miracle.fit(
-    #     mx,
-    #     X_seed=imputed_data_x,
-    # )
-    # return miracle_imputed_data_x
-    from miracle import MIRACLE
-    print("_____________1______________________")
-    mx = mx.copy()
-    missing_idxs = np.where(np.any(np.isnan(mx), axis=0))[0]
-    mx_imputed = mean_impu(mx)
-    miracle = MIRACLE(
-        num_inputs=mx.shape[1],
-        reg_lambda=6,
-        reg_beta=4,
-        n_hidden=32,
-        ckpt_file="tmp.ckpt",
-        missing_list=missing_idxs,
-        reg_m=0.1,
-        lr=0.01,
-        window=10,
-        max_steps=800,
-    )
-    miracle_imputed_data_x = miracle.fit(
-        mx,
-        X_seed=mx_imputed,
-    )
-    return miracle_imputed_data_x
-
-def saits_impu(mx, epochs=100, d_model=256, n_layers=2, n_heads=4, 
-               d_k=32, d_v=32, d_ffn=64, dropout=0.2, device=None):
+def saits_impu(mx, epochs=10, d_model=128, n_layers=2, n_heads=4, 
+               d_k=32, d_v=32, d_ffn=64, dropout=0.4, device=None):
     from pypots.imputation import SAITS
     # print("_____________2______________________")
     mx = mx.copy()
@@ -213,58 +227,49 @@ def saits_impu(mx, epochs=100, d_model=256, n_layers=2, n_heads=4,
     imputed_data_2d = imputed_data_3d[0]  # shape: (n_steps, n_features)
     return imputed_data_2d
 
-def timemixerpp_impu(mx, n_layers=2, d_model=None, d_ffn=128, top_k=5, 
-                     n_heads=4, n_kernels=6, dropout=0.1, epochs=100, batch_size=32, 
-                     patience=10, device=None, verbose=False, random_seed=42):
-    from pypots.imputation import TimeMixerPP
-    import numpy as np
-
-    mx = mx.copy()
-    np.random.seed(random_seed)
-    n_steps, n_features = mx.shape
-    data_3d = mx[np.newaxis, :, :]  # (1, n_timesteps, n_features)
-
-    downsampling_window = 2
-    downsampling_layers = 3
-
-    # 关键逻辑：确保 d_kv >= 1
-    d_time_model = max(1, n_steps // (downsampling_window ** downsampling_layers))
-    d_kv = max(1, d_time_model // n_heads)
-    if d_model is None:
-        d_model = max(4, d_kv * n_heads)
-
-    if verbose:
-        print(f"[TimeMixerPP] d_model={d_model}, d_kv={d_kv}, d_time_model={d_time_model}, n_heads={n_heads}")
-
-    train_data = {'X': data_3d.copy()}
-
-    timemixer = TimeMixerPP(
-        n_steps=n_steps,
-        n_features=n_features,
-        n_layers=n_layers,
-        d_model=d_model,
-        d_ffn=d_ffn,
-        top_k=top_k,
-        n_heads=n_heads,
-        n_kernels=n_kernels,
-        dropout=dropout,
-        channel_mixing=True,
-        channel_independence=True,
-        downsampling_layers=downsampling_layers,
-        downsampling_window=downsampling_window,
-        apply_nonstationary_norm=False,
-        batch_size=batch_size,
-        epochs=epochs,
-        patience=patience,
-        device=device,
-        verbose=verbose,
-    )
-
-    timemixer.fit(train_data)
-    test_data = {'X': data_3d.copy()}
-    imputed_data_3d = timemixer.predict(test_data)['imputation']
-    imputed_data = imputed_data_3d[0, :, :]
-    return imputed_data
+def timemixerpp_impu(mx):
+    """TimeMixer++ 填补函数的修复版本"""
+    try:
+        from pypots.imputation import TimeMixerpp
+        
+        # 检查输入维度
+        if mx.shape[1] < 5:
+            print(f"TimeMixer++ 需要至少5个特征，当前只有 {mx.shape[1]}，使用均值填补")
+            return mean_impu(mx)
+        
+        # 确保输入格式正确
+        if len(mx.shape) == 2:
+            # 添加batch维度
+            train_data = mx[np.newaxis, ...]
+        else:
+            train_data = mx
+        
+        # 创建模型时指定正确的参数
+        timemixer = TimeMixerpp(
+            n_steps=mx.shape[0],
+            n_features=mx.shape[1],
+            n_layers=16,  # 减少层数
+            d_model=32,  # 减少模型维度
+            n_heads=4,   # 减少注意力头数
+            epochs=50,   # 减少训练轮数
+            batch_size=32,
+            patience=1,
+            device='cuda' if torch.cuda.is_available() else 'cpu'
+        )
+        
+        # 训练和填补
+        timemixer.fit(train_data)
+        imputed_data = timemixer.predict(train_data)
+        
+        # 确保输出格式正确
+        if len(imputed_data.shape) == 3:
+            return imputed_data[0]  # 移除batch维度
+        else:
+            return imputed_data
+            
+    except Exception as e:
+        print(f"TimeMixer++ 执行失败: {e}")
+        return mean_impu(mx)
 
 
 

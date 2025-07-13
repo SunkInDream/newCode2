@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from multiprocessing import Pool
 import os
 from tqdm import tqdm
+from multiprocessing import Process, Queue
 def prepare_data(file_or_array): 
     if isinstance(file_or_array, str): 
         # 处理文件路径
@@ -79,94 +80,80 @@ def run_single_task(args):
              validated.remove(idx) 
     return target_idx, validated
 
-def compute_causal_matrix_with_gpu(args):
-    """
-    真正给 Pool 调用的 worker。
-    先隔离 GPU，再 import TF，再跑模型。
-    """
-    import os
-    import numpy as np
-    import torch   # 这里 torch 仅用于张量计算，不会占 GPU
-
-    file_or_array, params, gpu_id = args
-
-    # ---------- ① GPU 隔离 ----------
-    if gpu_id == 'cpu':
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-    # ---------- ② 延迟 import TF ----------
-    import tensorflow as tf
-    tf.config.threading.set_intra_op_parallelism_threads(1)
-    tf.config.threading.set_inter_op_parallelism_threads(1)
-
-    gpus = tf.config.list_physical_devices('GPU')
-    for g in gpus:                             # GPU 数量可能为 0
-        tf.config.experimental.set_memory_growth(g, True)
-
-    # ---------- ③ 真正计算 ----------
-    return compute_causal_matrix(file_or_array, params, gpu_id)
 
 def compute_causal_matrix(file_or_array, params, gpu_id=0):
+    # gpu_id 是在子进程中接收到的，必须是 0（因为只可见一个 GPU）
+    device = f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu'
+    
     x, mask, columns = prepare_data(file_or_array)
     num_features = x.shape[1]
-    
-    # 修复设备选择逻辑
-    if gpu_id == 'cpu' or not torch.cuda.is_available():
-        device = 'cpu'
-    elif isinstance(gpu_id, int) and gpu_id < torch.cuda.device_count():
-        device = f'cuda:{gpu_id}'
-    else:
-        device = 'cpu'
-    
-    # 串行处理各个特征
-    results = [] 
-    for i in range(num_features): 
-        results.append(run_single_task((i, file_or_array, params, device))) 
- 
-    matrix = np.zeros((num_features, num_features), dtype=int) 
-    for tgt, causes in results: 
-        for c in causes: 
-            matrix[tgt, c] = 1 
+
+    results = []
+    for i in range(num_features):
+        results.append(run_single_task((i, file_or_array, params, device)))
+
+    matrix = np.zeros((num_features, num_features), dtype=int)
+    for tgt, causes in results:
+        for c in causes:
+            matrix[tgt, c] = 1
     return matrix
 
-def parallel_compute_causal_matrices(data_list, params_list, max_workers=None):
-    """
-    并行计算多个因果矩阵
-    
-    Args:
-        data_list: 数据文件路径或numpy数组的列表
-        params_list: 对应的参数列表
-        max_workers: 最大工作进程数，默认为GPU数量
-    
-    Returns:
-        results: 因果矩阵结果列表
-    """
-    # 获取可用GPU数量
+
+def compute_causal_matrix_worker(task_queue, result_queue):
+    while True:
+        item = task_queue.get()
+        if item is None:
+            break
+        idx, data, params, real_gpu_id = item
+
+        # 限制当前进程只可见一个 GPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(real_gpu_id)
+
+        # 初始化 TF 以避免干扰（如有使用）
+        import tensorflow as tf
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+        for g in tf.config.list_physical_devices('GPU'):
+            tf.config.experimental.set_memory_growth(g, True)
+
+        # 在当前进程中，唯一可见的 GPU 是 CUDA_VISIBLE_DEVICES=real_gpu_id
+        # 所以 PyTorch 中直接使用 cuda:0 即可
+        matrix = compute_causal_matrix(data, params, gpu_id=0)
+        result_queue.put((idx, matrix))
+
+def parallel_compute_causal_matrices(data_list, params_list):
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
-        print("警告: 未检测到GPU，将使用CPU运行")
-        max_workers = max_workers or os.cpu_count()
-        gpu_ids = ['cpu'] * len(data_list)
-    else:
-        max_workers = max_workers or num_gpus
-        # 循环分配GPU
-        gpu_ids = [i % num_gpus for i in range(len(data_list))]
-    
-    print(f"使用 {max_workers} 个进程并行处理 {len(data_list)} 个矩阵")
-    
-    # 准备参数
-    args_list = [(data, params, gpu_id) 
-                 for data, params, gpu_id in zip(data_list, params_list, gpu_ids)]
-    
-    # 并行执行
-    with Pool(processes=max_workers) as pool:
-        results = list(tqdm(
-            pool.imap(compute_causal_matrix_with_gpu, args_list),
-            total=len(args_list),
-            desc="计算因果矩阵",
-            ncols=80
-        ))
-    
+        raise RuntimeError("未检测到 GPU，无法并行运行")
+
+    task_queue = Queue()
+    result_queue = Queue()
+
+    # 将任务按 index 放入队列中
+    for idx, (data, params) in enumerate(zip(data_list, params_list)):
+        task_queue.put((idx, data, params, idx % num_gpus))
+    for _ in range(num_gpus):
+        task_queue.put(None)  # 每个进程收到一个终止信号
+
+    # 启动每个 GPU 的 worker 进程
+    workers = []
+    for gpu_id in range(num_gpus):
+        p = Process(target=compute_causal_matrix_worker, args=(task_queue, result_queue))
+        p.start()
+        workers.append(p)
+
+    results = [None] * len(data_list)
+    finished = 0
+
+    # 使用 tqdm 显示进度
+    with tqdm(total=len(data_list), desc="计算因果矩阵") as pbar:
+        while finished < len(data_list):
+            idx, matrix = result_queue.get()
+            results[idx] = matrix
+            finished += 1
+            pbar.update(1)
+
+    for p in workers:
+        p.join()
+
     return results
