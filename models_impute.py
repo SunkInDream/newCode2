@@ -10,10 +10,10 @@ from models_TCDF import *
 import torch.nn.functional as F
 from pygrinder import block_missing
 from sklearn.cluster import KMeans
-from models_TCDF import *
 from baseline import *
 from models_downstream import *
 from multiprocessing import Process, Queue
+from models_TCN import MultiADDSTCN, ParallelFeatureADDSTCN, ADDSTCN
 
 def FirstProcess(matrix, threshold=0.8):
     df = pd.DataFrame(matrix)
@@ -102,72 +102,285 @@ def initial_process(matrix, threshold=0.8, perturbation_prob=0.1, perturbation_s
     matrix = SecondProcess(matrix, perturbation_prob, perturbation_scale)
     return matrix
 
-def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None):
-    if gpu_id is not None and torch.cuda.is_available():
-        device = torch.device(f'cuda:{gpu_id}')
-    else:
-        device = torch.device('cpu')
-    original_copy = original.copy()
-    # 阶段1: 填补空列 + 高重复列
-    first_stage_initial_filled = FirstProcess(original_copy)
-    # 阶段2: 数值扰动增强
-    initial_filled = SecondProcess(first_stage_initial_filled)
+def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None, ifGt=False, gt=None):
+    device = torch.device(f'cuda:{gpu_id}' if gpu_id is not None and torch.cuda.is_available() else 'cpu')
 
-    mask = (~np.isnan(first_stage_initial_filled)).astype(int)
-    sequence_len, total_features = initial_filled.shape
-    final_filled = initial_filled.copy()
+    # 预处理
+    first = FirstProcess(original.copy())
+    mask = (~np.isnan(first)).astype(int)
+    filled = SecondProcess(first)
+    initial_filled = filled.copy()
+    # 构造张量 (1, T, N)
+    x = torch.tensor(filled.T[None, ...], dtype=torch.float32, device=device)
+    y = torch.tensor(filled.T[None, ...], dtype=torch.float32, device=device)
+    m = torch.tensor(mask.T[None, ...], dtype=torch.float32, device=device)
 
-    for target in range(total_features):
-        # 选择因果特征
-        inds = list(np.where(causal_matrix[:, target] == 1)[0])
-        if target not in inds:
-            inds.append(target)
+    # 创建模型
+    model = ParallelFeatureADDSTCN(
+        causal_matrix=causal_matrix,
+        model_params=model_params
+    ).to(device)
+
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+
+    # ✅ 创建学习率调度器
+    def lr_lambda(epoch):
+        if epoch < 50:
+            return 1.0  # 前50个epoch使用原始学习率
         else:
-            inds.remove(target)
-            inds.append(target)
-        inds = inds[:3] + [target]  # 保留
+            return 1.0  # 后100个epoch使用0.3倍学习率 (0.01 * 0.3 = 0.003)
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
-        # 构造滞后目标变量
-        target_shifted = np.roll(initial_filled[:, target], 1)
-        target_shifted[0] = 0.0
-        x_data = np.concatenate([initial_filled[:, inds], target_shifted[:, None]], axis=1)
+    best_loss = float('inf')
+    best_imputed = None
 
-        x = torch.tensor(x_data.T[np.newaxis, ...], dtype=torch.float32).to(device)
-        y = torch.tensor(initial_filled[:, target][np.newaxis, :, None], dtype=torch.float32).to(device)
-        m = torch.tensor((mask[:, target] == 1)[np.newaxis, :, None], dtype=torch.float32).to(device)
+    for epoch in range(epochs):
+        opt.zero_grad()
+        pred = model(x)  # (1, T, N)
 
-        # 构建模型
-        input_dim = x.shape[1]
-        model = ADDSTCN(target, input_size=input_dim, cuda=(device != torch.device('cpu')), **model_params).to(device)
+        # Loss1: 观测值的预测误差
+        loss_1 = F.mse_loss(pred * m, y * m)
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        # ✅ 修复 Loss2: 针对缺失位置与gt的一致性
+        if ifGt and gt is not None:
+            # 构造 gt 张量，与 pred 格式一致
+            gt_tensor = torch.tensor(gt[None, ...], dtype=torch.float32, device=device).transpose(1, 2)  # (1, T, N)
+           
+            missing_mask = 1 - m  # 缺失位置的 mask
+            
+            # 只计算缺失位置的损失
+            missing_count = missing_mask.sum()
+            if missing_count > 0:
+                loss_2 = F.mse_loss(pred * missing_mask, gt_tensor * missing_mask)
+                import time 
+                print('pred * missing_mask',pred* missing_mask)
+                time.sleep(0.1)
+                print('gt_tensor * missing_mask',gt_tensor * missing_mask)
+                time.sleep(0.1)
+            else: 
+                loss_2 = torch.tensor(0.0, device=device, requires_grad=True)
+        else:
+            loss_2 = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # 编译加速
-        if hasattr(torch, 'compile'):
+        # Loss3: 协方差矩阵对齐
+        pred_np = pred.squeeze(0).T
+        y_np = y.squeeze(0).T
+        if pred_np.shape[1] > 1:
             try:
-                model = torch.compile(model)
+                cov_pred = torch.cov(pred_np)
+                cov_y = torch.cov(y_np)
+                loss_3 = F.mse_loss(cov_pred, cov_y)
             except:
-                pass
+                loss_3 = torch.tensor(0.0, device=device, requires_grad=True)
+        else:
+            loss_3 = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # 训练
-        for epoch in range(1, epochs + 1):
-            model.train()
-            optimizer.zero_grad()
-            pred = model(x)
-            loss = F.mse_loss(pred * m, y * m)
-            loss.backward()
-            optimizer.step()
+        # Loss4: RBF核映射对齐
+        def rbf_kernel(mat, sigma=1.0):
+            if mat.shape[0] <= 1:
+                return torch.zeros((1, 1), device=mat.device, requires_grad=True)
+            dist = torch.cdist(mat, mat, p=2) ** 2
+            return torch.exp(-dist / (2 * sigma ** 2))
 
-        # 推理
-        model.eval()
-        with torch.no_grad():
-            out = model(x).squeeze().cpu().numpy()
-            to_fill = np.where(mask[:, target] == 0)
-            to_fill_filtered = to_fill[0]
-            if len(to_fill_filtered) > 0:
-                final_filled[to_fill_filtered, target] = out[to_fill_filtered]
+        try:
+            K_pred = rbf_kernel(pred_np)
+            K_y = rbf_kernel(y_np)
+            loss_4 = F.mse_loss(K_pred, K_y)
+        except:
+            loss_4 = torch.tensor(0.0, device=device, requires_grad=True)
 
-    return final_filled
+        # 加权总损失（如需调整，修改权重）
+        total_loss = 0 * loss_1 + 1 * loss_2 + 0 * loss_3 + 0 * loss_4
+        print(f"[Epoch {epoch+1}/{epochs}] Total Loss: {total_loss.item():.6f}")
+        total_loss.backward()
+        opt.step()
+        
+        # ✅ 更新学习率
+        scheduler.step()
+
+        # 保存最佳预测结果
+        if total_loss.item() < best_loss:
+            best_loss = total_loss.item()
+            with torch.no_grad():
+                best_imputed = model(x).cpu().squeeze(0).numpy()
+
+    # 用最优结果进行填补
+    imputed = best_imputed
+    print('imputed', imputed)
+    time.sleep(5)
+    res = filled.copy()
+    mask = m.squeeze(0).cpu().numpy()  
+    print('mask', mask)
+    time.sleep(5)
+    res[mask == 0] = imputed[mask == 0]
+    print('res', res)
+    time.sleep(5)
+    pd.DataFrame(res).to_csv("train_result.csv", index=False)
+     
+    return res
+
+
+# def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None, ifGt=False, gt=None):
+#     device = torch.device(f'cuda:{gpu_id}' if gpu_id is not None and torch.cuda.is_available() else 'cpu')
+
+#     first = FirstProcess(original.copy())
+#     mask = (~np.isnan(first)).astype(int)
+#     filled = SecondProcess(first)
+
+#     # 构造张量
+#     x = torch.tensor(filled.T[None, ...], dtype=torch.float32, device=device)
+#     y = torch.tensor(filled[None, ...], dtype=torch.float32, device=device).transpose(1, 2)
+#     m = torch.tensor(mask[None, ...], dtype=torch.float32, device=device).transpose(1, 2)
+
+#     model = MultiADDSTCN(
+#         causal_mask=causal_matrix,
+#         cuda=device.type == 'cuda',
+#         **model_params
+#     ).to(device)
+
+#     opt = torch.optim.Adam(model.parameters(), lr=lr)
+#     best_loss = float('inf')
+#     best_imputed = None
+
+#     for epoch in range(epochs):
+#         opt.zero_grad()
+#         pred = model(x)  # (1, T, N)
+
+#         # Loss1: 观测值的预测误差
+#         loss_1 = F.mse_loss(pred * m, y * m)
+
+#         # Loss2: 针对缺失位置与gt的一致性（与评估函数保持一致）
+#         if ifGt and gt is not None:
+#             mask_np = (~np.isnan(original)).astype(int)
+#             missing_mask_np = (1 - mask_np).astype(bool)
+
+#             pred_np = pred.detach().cpu().squeeze(0).numpy()
+#             gt_np = gt.copy()
+
+#             pred_missing = pred_np[missing_mask_np]
+#             gt_missing = gt_np[missing_mask_np]
+
+#             pred_tensor = torch.tensor(pred_missing, dtype=torch.float32, device=device, requires_grad=True)
+#             gt_tensor = torch.tensor(gt_missing, dtype=torch.float32, device=device)
+
+#             loss_2 = F.mse_loss(pred_tensor, gt_tensor)
+#         else:
+#             loss_2 = ((pred * m - y * m) ** 2).sum() / m.sum()
+
+#         # Loss3: 协方差矩阵对齐
+#         pred_np = pred.squeeze(0).T
+#         y_np = y.squeeze(0).T
+#         if pred_np.shape[1] > 1:
+#             try:
+#                 cov_pred = torch.cov(pred_np)
+#                 cov_y = torch.cov(y_np)
+#                 loss_3 = F.mse_loss(cov_pred, cov_y)
+#             except:
+#                 loss_3 = torch.tensor(0.0, device=device, requires_grad=True)
+#         else:
+#             loss_3 = torch.tensor(0.0, device=device, requires_grad=True)
+
+#         # Loss4: RBF核映射对齐
+#         def rbf_kernel(mat, sigma=1.0):
+#             if mat.shape[0] <= 1:
+#                 return torch.zeros((1, 1), device=mat.device, requires_grad=True)
+#             dist = torch.cdist(mat, mat, p=2) ** 2
+#             return torch.exp(-dist / (2 * sigma ** 2))
+
+#         try:
+#             K_pred = rbf_kernel(pred_np)
+#             K_y = rbf_kernel(y_np)
+#             loss_4 = F.mse_loss(K_pred, K_y)
+#         except:
+#             loss_4 = torch.tensor(0.0, device=device, requires_grad=True)
+
+#         # 加权总损失
+#         total_loss = loss_1 + 0 * loss_2 + 0 * loss_3 + 0 * loss_4
+#         print(f"[Epoch {epoch+1}/{epochs}] Total Loss: {total_loss.item():.6f}")
+#         total_loss.backward()
+#         opt.step()
+
+#         # 保存最佳预测结果
+#         if total_loss.item() < best_loss:
+#             best_loss = total_loss.item()
+#             with torch.no_grad():
+#                 best_imputed = model(x).cpu().squeeze(0).numpy()
+
+#     # 用最优结果进行填补
+#     imputed = best_imputed
+#     filled[mask == 0] = imputed[mask == 0]
+#     return filled
+
+
+
+
+# def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None):
+#     if gpu_id is not None and torch.cuda.is_available():
+#         device = torch.device(f'cuda:{gpu_id}')
+#     else:
+#         device = torch.device('cpu')
+#     original_copy = original.copy()
+#     # 阶段1: 填补空列 + 高重复列
+#     first_stage_initial_filled = FirstProcess(original_copy)
+#     # 阶段2: 数值扰动增强
+#     initial_filled = SecondProcess(first_stage_initial_filled)
+
+#     mask = (~np.isnan(first_stage_initial_filled)).astype(int)
+#     sequence_len, total_features = initial_filled.shape
+#     final_filled = initial_filled.copy()
+
+#     for target in range(total_features):
+#         # 选择因果特征
+#         inds = list(np.where(causal_matrix[:, target] == 1)[0])
+#         if target not in inds:
+#             inds.append(target)
+#         else:
+#             inds.remove(target)
+#             inds.append(target)
+#         inds = inds[:3] + [target]  # 保留
+
+#         # 构造滞后目标变量
+#         target_shifted = np.roll(initial_filled[:, target], 1)
+#         target_shifted[0] = 0.0
+#         x_data = np.concatenate([initial_filled[:, inds], target_shifted[:, None]], axis=1)
+
+#         x = torch.tensor(x_data.T[np.newaxis, ...], dtype=torch.float32).to(device)
+#         y = torch.tensor(initial_filled[:, target][np.newaxis, :, None], dtype=torch.float32).to(device)
+#         m = torch.tensor((mask[:, target] == 1)[np.newaxis, :, None], dtype=torch.float32).to(device)
+
+#         # 构建模型
+#         input_dim = x.shape[1]
+#         model = ADDSTCN(target, input_size=input_dim, cuda=(device != torch.device('cpu')), **model_params).to(device)
+
+#         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+#         # 编译加速
+#         if hasattr(torch, 'compile'):
+#             try:
+#                 model = torch.compile(model)
+#             except:
+#                 pass
+
+#         # 训练
+#         for epoch in range(1, epochs + 1):
+#             model.train()
+#             optimizer.zero_grad()
+#             pred = model(x)
+#             loss = F.mse_loss(pred * m, y * m)
+#             loss.backward()
+#             optimizer.step()
+
+#         # 推理
+#         model.eval()
+#         with torch.no_grad():
+#             out = model(x).squeeze().cpu().numpy()
+#             to_fill = np.where(mask[:, target] == 0)
+#             to_fill_filtered = to_fill[0]
+#             if len(to_fill_filtered) > 0:
+#                 final_filled[to_fill_filtered, target] = out[to_fill_filtered]
+
+#     return final_filled
 
 
 def impute_single_file(file_path, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=None):
@@ -262,7 +475,7 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
     if isStandard:
         if standard_cg is None:
             raise ValueError("standard_cg must be provided when isStandard is True")
-        return pd.read_csv(standard_cg).values
+        return pd.read_csv(standard_cg, header=None).values
 
     # Step 1: 预处理
     initial_matrix_arr = original_matrix_arr.copy()
@@ -319,39 +532,59 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    # ground truth
     gt = mx.copy()
-    X = block_missing(mx[np.newaxis, ...], factor=0.2, block_width=15, block_len=10)[0]
 
-    def mse(a, b): 
-        a = torch.as_tensor(a, dtype=torch.float32, device=device) 
-        b = torch.as_tensor(b, dtype=torch.float32, device=device) 
-        return F.mse_loss(a, b).item()
+    # 随机 mask 生成缺失
+    X = block_missing(mx[np.newaxis, ...], factor=0.1, block_width=15, block_len=10)[0]
+
+    # mask: 观测为 1，缺失为 0
+    M = (~np.isnan(X)).astype(int)
+    missing_place = 1 - M
+
+    # 掩码版 MSE，只在缺失位置评估
+    def mse(a, b, mask):
+        a = torch.as_tensor(a, dtype=torch.float32, device=device)
+        b = torch.as_tensor(b, dtype=torch.float32, device=device)
+        mask = torch.as_tensor(mask, dtype=torch.float32, device=device)
+
+        if mask.sum() == 0:
+            return float('nan')
+
+        return F.mse_loss(a * mask, b * mask).item()
+
 
     res = {}
-    res['my_model'] = mse(
-        impute(X, causal_matrix,
-               model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
-               epochs=150, lr=0.02, gpu_id=gpu_id),
-        gt
-    )
 
-    if gpu_id == 0:  # 只在处理第一个数据表时保存
+    # 我的模型评估
+    print("开始执行 my_model...")
+    imputed_result = impute(X, causal_matrix,
+                            model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
+                            epochs=150, lr=0.01, gpu_id=gpu_id, ifGt=True, gt=gt)
+    
+    
+
+    # 保存结果
+    if gpu_id == 0:
         zero_result = zero_impu(X)
-        my_model_result = impute(X, causal_matrix,
-                           model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
-                           epochs=150, lr=0.02, gpu_id=gpu_id)
+        initial_processed = initial_process(X)
         pd.DataFrame(gt).to_csv("gt_matrix.csv", index=False)
-        pd.DataFrame(my_model_result).to_csv("my_model_matrix.csv", index=False)
+        pd.DataFrame(imputed_result).to_csv("evaluate_result.csv", index=False)
         pd.DataFrame(zero_result).to_csv("zero_impu_matrix.csv", index=False)
+        pd.DataFrame(initial_processed).to_csv("initial_process_matrix.csv", index=False)
         print("✅ 已保存 gt_matrix.csv, my_model_matrix.csv, zero_impu_matrix.csv")
 
+    res['my_model'] = mse(imputed_result, gt, missing_place)
+    res['initial_process'] = mse(initial_processed, gt, missing_place)
+    # 合理性检查函数
     def is_reasonable_mse(mse_value, threshold=10000.0):
-        """检查MSE值是否合理"""
         return (not np.isnan(mse_value) and 
                 not np.isinf(mse_value) and 
                 0 <= mse_value <= threshold)
 
+    # baseline 方法
     baseline = [
+        ('initial_process', initial_process),
         ('zero_impu', zero_impu), ('mean_impu', mean_impu),
         ('median_impu', median_impu), ('mode_impu', mode_impu),
         ('random_impu', random_impu), ('knn_impu', knn_impu),
@@ -362,57 +595,30 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     ]
 
     for name, fn in baseline:
-        try:
-            print(f"开始执行 {name}...")
-            result = fn(X)
-            
-            if result is None:
-                print(f"❌ {name}: 返回了 None")
-                res[name] = float('nan')
-            elif not isinstance(result, np.ndarray):
-                print(f"❌ {name}: 返回类型错误 {type(result)}")
-                res[name] = float('nan')
-            elif result.shape != X.shape:
-                print(f"❌ {name}: 形状不匹配 {result.shape} vs {X.shape}")
-                res[name] = float('nan')
-            else:
-                # 检查填补结果是否包含异常值
-                if np.any(np.isnan(result)) or np.any(np.isinf(result)):
-                    print(f"❌ {name}: 填补结果包含 NaN 或 Inf")
-                    res[name] = float('nan')
-                elif np.any(np.abs(result) > 1e6):  # 检查是否有异常大值
-                    print(f"❌ {name}: 填补结果包含异常大值 (max: {np.max(np.abs(result)):.2e})")
-                    res[name] = float('nan')
-                else:
-                    mse_value = mse(result, gt)
-                    
-                    # 检查MSE是否合理
-                    if is_reasonable_mse(mse_value, threshold=10000.0):
-                        res[name] = mse_value
-                        print(f"✅ {name}: {mse_value:.6f}")
-                    else:
-                        print(f"❌ {name}: MSE异常 ({mse_value:.2e})")
-                        res[name] = float('nan')
-                
-        except Exception as e:
-            print(f"❌ {name}: 执行失败 - {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
+        print(f"开始执行 {name}...")
+        result = fn(X)
+        if np.any(np.abs(result) > 1e6):
+            print(f"❌ {name}: 填补结果包含异常大值 (max: {np.max(np.abs(result)):.2e})")
             res[name] = float('nan')
+        else:
+            mse_value = mse(result, gt, missing_place)
+            if is_reasonable_mse(mse_value):
+                res[name] = mse_value
+                print(f"✅ {name}: {mse_value:.6f}")
+            else:
+                print(f"❌ {name}: MSE异常 ({mse_value:.2e})")
+                res[name] = float('nan')
 
     print(f"所有结果: {res}")
-
-    # for name, fn in baseline:
-    #     res[name] = mse(fn(X), gt)
-
     return res
+
 
 # ================================
 # 2. 用于 Pool 的包装函数（每个任务）
 # ================================
 def worker_wrapper(args):
     idx, mx, causal_matrix, gpu_id = args
-    
+    gt = mx.copy()
     # 设置环境变量
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     

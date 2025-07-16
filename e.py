@@ -88,27 +88,18 @@ def generate_multiple_lorenz_datasets(num_datasets, p, T, seed_start=0):
     return datasets
 def save_lorenz_datasets_to_csv(datasets, output_dir):
     """
-    将Lorenz-96数据集保存为CSV文件
-    
-    参数:
-    datasets -- 数据集列表，每个元素为(X, GC)元组
-    output_dir -- 保存CSV文件的目录路径
+    将Lorenz-96数据集保存为CSV文件，并在第一行添加列名：lorenz_1, lorenz_2, ...
     """
-    # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
-    
-    # 遍历所有数据集
+
     for i, (X, GC) in enumerate(datasets):
-        # 构造文件名
         X_filename = os.path.join(output_dir, f"lorenz_dataset_{i}_timeseries.csv")
-        #GC_filename = os.path.join(output_dir, f"lorenz_dataset_{i}_causality.csv")
         
-        # 保存时间序列数据
-        np.savetxt(X_filename, X, delimiter=',')
-        
-        # 保存因果关系矩阵
-        #np.savetxt(GC_filename, GC, delimiter=',', fmt='%d')  # 使用%d格式因为GC是整数矩阵
-        
+        # ✅ 添加列名
+        col_names = [f"lorenz_{j+1}" for j in range(X.shape[1])]
+        df = pd.DataFrame(X, columns=col_names)
+        df.to_csv(X_filename, index=False)
+
     print(f"已保存 {len(datasets)} 个数据集到 {output_dir} 目录")
 def generate_and_save_lorenz_datasets(num_datasets, p, T, output_dir, causality_dir=None, seed_start=0):
     """
@@ -347,18 +338,18 @@ def regenerate_data_with_same_structure(beta, GC, T, sd, seed):
 #     num_neg = 1000,
 #     random_state = 33
 # )
-# generate_and_save_lorenz_datasets(num_datasets=12, p=100, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
-datasets = generate_var_datasets_with_fixed_structure(
-        num_datasets=12,
-        p=50,
-        T=50, 
-        lag=4,
-        output_dir="./data/var",          # 时间序列数据保存目录
-        causality_dir="./causality_matrices", # 因果矩阵保存目录
-        sparsity=0.3,
-        beta_value=0.3,
-        auto_corr=0.6,
-        sd=0.3,
-        master_seed=33
-    )
+generate_and_save_lorenz_datasets(num_datasets=12, p=100, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
+# datasets = generate_var_datasets_with_fixed_structure(
+#         num_datasets=12,
+#         p=50,
+#         T=50, 
+#         lag=4,
+#         output_dir="./data/var",          # 时间序列数据保存目录
+#         causality_dir="./causality_matrices", # 因果矩阵保存目录
+#         sparsity=0.3,
+#         beta_value=0.3,
+#         auto_corr=0.6,
+#         sd=0.3,
+#         master_seed=33
+#     )
     
