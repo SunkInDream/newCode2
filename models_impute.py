@@ -104,10 +104,12 @@ def initial_process(matrix, threshold=0.8, perturbation_prob=0.1, perturbation_s
 
 def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None, ifGt=False, gt=None):
     device = torch.device(f'cuda:{gpu_id}' if gpu_id is not None and torch.cuda.is_available() else 'cpu')
-
+    print('missing_count', np.isnan(original).sum())
     # 预处理
     first = FirstProcess(original.copy())
+    print('missing_count', np.isnan(first).sum())
     mask = (~np.isnan(first)).astype(int)
+    pd.DataFrame(mask).to_csv("mask_qian.csv", index=False)
     filled = SecondProcess(first)
     initial_filled = filled.copy()
     # 构造张量 (1, T, N)
@@ -148,6 +150,7 @@ def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=No
             gt_tensor = torch.tensor(gt[None, ...], dtype=torch.float32, device=device).transpose(1, 2)  # (1, T, N)
            
             missing_mask = 1 - m  # 缺失位置的 mask
+            print('missing_mask', missing_mask.sum())
             
             # 只计算缺失位置的损失
             missing_count = missing_mask.sum()
@@ -155,9 +158,9 @@ def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=No
                 loss_2 = F.mse_loss(pred * missing_mask, gt_tensor * missing_mask)
                 import time 
                 print('pred * missing_mask',pred* missing_mask)
-                time.sleep(0.1)
+                # time.sleep(0.1)
                 print('gt_tensor * missing_mask',gt_tensor * missing_mask)
-                time.sleep(0.1)
+                # time.sleep(0.1)
             else: 
                 loss_2 = torch.tensor(0.0, device=device, requires_grad=True)
         else:
@@ -207,18 +210,20 @@ def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=No
 
     # 用最优结果进行填补
     imputed = best_imputed
-    print('imputed', imputed)
-    time.sleep(5)
+    # print('imputed', imputed)
+    # time.sleep(5)
     res = filled.copy()
-    mask = m.squeeze(0).cpu().numpy()  
-    print('mask', mask)
-    time.sleep(5)
+    # mask = mask.T
+    pd.DataFrame(mask).to_csv("maskTTT.csv", index=False)
+    # print('mask', mask)
+    # time.sleep(5)
     res[mask == 0] = imputed[mask == 0]
-    print('res', res)
-    time.sleep(5)
+    # print('gt', gt)
+    # print('res', res)
+    # time.sleep(5)
     pd.DataFrame(res).to_csv("train_result.csv", index=False)
      
-    return res
+    return res.T,mask
 
 
 # def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None, ifGt=False, gt=None):
@@ -533,36 +538,54 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # ground truth
-    gt = mx.copy()
+    gt = mx.copy().T
 
     # 随机 mask 生成缺失
     X = block_missing(mx[np.newaxis, ...], factor=0.1, block_width=15, block_len=10)[0]
-
-    # mask: 观测为 1，缺失为 0
-    M = (~np.isnan(X)).astype(int)
-    missing_place = 1 - M
+    # # mask: 观测为 1，缺失为 0
+    # M = (~np.isnan(X)).astype(int)
+    # missing_place = 1 - M
 
     # 掩码版 MSE，只在缺失位置评估
     def mse(a, b, mask):
         a = torch.as_tensor(a, dtype=torch.float32, device=device)
         b = torch.as_tensor(b, dtype=torch.float32, device=device)
-        mask = torch.as_tensor(mask, dtype=torch.float32, device=device)
-
+        mask = torch.as_tensor(mask.T, dtype=torch.float32, device=device)
+        print('gt :', b)
         if mask.sum() == 0:
             return float('nan')
-
-        return F.mse_loss(a * mask, b * mask).item()
+        
+        # ✅ 计算逐个元素的误差
+        element_wise_error = (a - b) ** 2  # 保持原始形状
+        
+        # 输出逐个元素的误差值
+        print("逐个元素的误差值:")
+        print(element_wise_error)
+        pd.DataFrame(element_wise_error.cpu().numpy()).to_csv("element_wise_error.csv", index=False)
+        pd.DataFrame(mask.cpu().numpy()).to_csv("mask.csv", index=False)
+        import time
+        time.sleep(5)
+        # 如果你只想看缺失位置的误差
+        missing_errors = element_wise_error[mask == 1]
+        print("缺失位置的误差值:")
+        print(missing_errors)
+        mask = 1- mask
+        pd.DataFrame((a*mask).cpu().numpy()).to_csv("a*c.csv", index=False)
+        pd.DataFrame((b*mask).cpu().numpy()).to_csv("b*c.csv", index=False)
+        pd.DataFrame(mask.cpu().numpy()).to_csv("c.csv", index=False)
+        pd.DataFrame(missing_errors.cpu().numpy()).to_csv("missing_errors.csv", index=False)
+        # 返回平均MSE（如果需要的话）
+        return F.mse_loss(a * mask, b * mask).item()  # 只计算缺失位置的MSE
 
 
     res = {}
 
     # 我的模型评估
     print("开始执行 my_model...")
-    imputed_result = impute(X, causal_matrix,
+    imputed_result,missing_place = impute(X, causal_matrix,
                             model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
-                            epochs=150, lr=0.01, gpu_id=gpu_id, ifGt=True, gt=gt)
-    
-    
+                            epochs=50, lr=0.01, gpu_id=gpu_id, ifGt=True, gt=gt)
+    print('imputed_result', imputed_result)
 
     # 保存结果
     if gpu_id == 0:
@@ -573,9 +596,13 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
         pd.DataFrame(zero_result).to_csv("zero_impu_matrix.csv", index=False)
         pd.DataFrame(initial_processed).to_csv("initial_process_matrix.csv", index=False)
         print("✅ 已保存 gt_matrix.csv, my_model_matrix.csv, zero_impu_matrix.csv")
-
+    print('imputed_result111', imputed_result)
+    print('gt111', gt)
+    pd.DataFrame(imputed_result).to_csv("imputed_result111.csv", index=False)
+    pd.DataFrame(gt).to_csv("gt111.csv", index=False)
+    pd.DataFrame(missing_place).to_csv("missing_place.csv", index=False)
     res['my_model'] = mse(imputed_result, gt, missing_place)
-    res['initial_process'] = mse(initial_processed, gt, missing_place)
+    # res['initial_process'] = mse(initial_processed, gt, missing_place)
     # 合理性检查函数
     def is_reasonable_mse(mse_value, threshold=10000.0):
         return (not np.isnan(mse_value) and 
@@ -584,14 +611,14 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
 
     # baseline 方法
     baseline = [
-        ('initial_process', initial_process),
-        ('zero_impu', zero_impu), ('mean_impu', mean_impu),
-        ('median_impu', median_impu), ('mode_impu', mode_impu),
-        ('random_impu', random_impu), ('knn_impu', knn_impu),
-        ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
-        ('miracle_impu', miracle_impu), ('saits_impu', saits_impu),
-        ('timemixerpp_impu', timemixerpp_impu), 
-        ('tefn_impu', tefn_impu),
+        # ('initial_process', initial_process),
+        # ('zero_impu', zero_impu), ('mean_impu', mean_impu),
+        # ('median_impu', median_impu), ('mode_impu', mode_impu),
+        # ('random_impu', random_impu), ('knn_impu', knn_impu),
+        # ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
+        # ('miracle_impu', miracle_impu), ('saits_impu', saits_impu),
+        # ('timemixerpp_impu', timemixerpp_impu), 
+        # ('tefn_impu', tefn_impu),
     ]
 
     for name, fn in baseline:
