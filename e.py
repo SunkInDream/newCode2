@@ -323,7 +323,67 @@ def regenerate_data_with_same_structure(beta, GC, T, sd, seed):
         data_scaled = np.full_like(data, 50.5)  # 如果所有值相同，设为中间值
     
     return data_scaled
+def generate_fama_french_datasets_with_shared_graph(
+    num_datasets: int,
+    T: int,
+    num_assets: int,
+    num_factors: int,
+    num_edges: int,
+    data_save_dir: str,
+    graph_save_path: str,
+    seed: int = None
+):
+    """
+    生成多个金融时间序列数据表，数据不同，但使用同一个因果图。
+    
+    参数：
+        num_datasets: 要生成的数据表数量
+        T: 时间序列长度
+        num_assets: 资产变量数量
+        num_factors: 因子变量数量（如3）
+        num_edges: 因果图中边的数量
+        data_save_dir: 保存数据表的目录
+        graph_save_path: 保存因果图的 CSV 文件路径（如 "./graph.csv"）
+        seed: 随机种子（可复现）
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    os.makedirs(data_save_dir, exist_ok=True)
 
+    total_vars = num_factors + num_assets
+    col_names = [f"F{i}" for i in range(num_factors)] + [f"A{i}" for i in range(num_assets)]
+
+    # ✅ 生成一个随机因果图 G
+    G = np.zeros((total_vars, total_vars), dtype=int)
+    edge_count = 0
+    while edge_count < num_edges:
+        i = np.random.randint(0, total_vars)
+        j = np.random.randint(num_factors, total_vars)  # 因子或资产 → 资产
+        if i != j and G[i, j] == 0:
+            G[i, j] = 1
+            edge_count += 1
+
+    # ✅ 保存因果图（只保存一次）
+    pd.DataFrame(G, index=False, columns=False).to_csv(graph_save_path)
+    print(f"Saved causal graph to: {graph_save_path}")
+
+    # ✅ 用该图生成多个不同的数据表
+    for d in range(num_datasets):
+        X = np.zeros((T + 1, total_vars))
+        X[0] = np.random.normal(0, 0.1, size=total_vars)
+
+        for t in range(1, T + 1):
+            for j in range(total_vars):
+                parents = np.where(G[:, j])[0]
+                for p in parents:
+                    X[t, j] += 0.5 * X[t - 1, p]
+                X[t, j] += np.random.normal(0, 0.05)
+
+        X = X[1:]  # 去掉初始时刻
+        save_path = os.path.join(data_save_dir, f"finance_dataset_{d}_timeseries.csv")
+        pd.DataFrame(X, columns=col_names).to_csv(save_path, index=False)
+        print(f"[{d+1}/{num_datasets}] Saved dataset to: {save_path}")
 
 # copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")
@@ -338,18 +398,27 @@ def regenerate_data_with_same_structure(beta, GC, T, sd, seed):
 #     num_neg = 1000,
 #     random_state = 33
 # )
-generate_and_save_lorenz_datasets(num_datasets=12, p=100, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
-# datasets = generate_var_datasets_with_fixed_structure(
-#         num_datasets=12,
-#         p=50,
-#         T=50, 
-#         lag=4,
-#         output_dir="./data/var",          # 时间序列数据保存目录
-#         causality_dir="./causality_matrices", # 因果矩阵保存目录
-#         sparsity=0.3,
-#         beta_value=0.3,
-#         auto_corr=0.6,
-#         sd=0.3,
-#         master_seed=33
-#     )
-    
+# generate_and_save_lorenz_datasets(num_datasets=1, p=100, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
+datasets = generate_var_datasets_with_fixed_structure(
+        num_datasets=1000,
+        p=100,
+        T=50, 
+        lag=4,
+        output_dir="./data/var",          # 时间序列数据保存目录
+        causality_dir="./causality_matrices", # 因果矩阵保存目录
+        sparsity=0.3,
+        beta_value=0.3,
+        auto_corr=0.6,
+        sd=0.3,
+        master_seed=33
+    )
+# generate_fama_french_datasets_with_shared_graph(
+#     num_datasets=1000,
+#     T=100,
+#     num_assets=50,
+#     num_factors=3,
+#     num_edges=400,
+#     data_save_dir="./data/finance",
+#     graph_save_path="./causality_matrices/finance_causality_matrix.csv",
+#     seed=42
+# )

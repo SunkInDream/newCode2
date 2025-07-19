@@ -34,88 +34,89 @@ def zero_impu(mx):
 #     return result
 def mean_impu(mx):
     mx = mx.copy()
-    col_means = np.nanmean(mx, axis=0)
-    inds = np.where(np.isnan(mx))
-    mx[inds] = np.take(col_means, inds[1])
-    if np.isnan(mx).any():
-        mx = np.nan_to_num(mx, nan=0)
-    return mx
+    # col_means = np.nanmean(mx, axis=0)
+    # inds = np.where(np.isnan(mx))
+    # mx[inds] = np.take(col_means, inds[1])
+    # if np.isnan(mx).any():
+    #     mx = np.nan_to_num(mx, nan=-1)
+    # return mx
+    mean = np.nanmean(mx)
+    return np.where(np.isnan(mx), mean, mx)
 
 def median_impu(mx):
     mx = mx.copy()
-    col_medians = np.nanmedian(mx, axis=0)
-    inds = np.where(np.isnan(mx))
-    mx[inds] = np.take(col_medians, inds[1])
-    if np.isnan(mx).any():
-        mx = np.nan_to_num(mx, nan=0)
-    return mx
+    # col_medians = np.nanmedian(mx, axis=0)
+    # inds = np.where(np.isnan(mx))
+    # mx[inds] = np.take(col_medians, inds[1])
+    # if np.isnan(mx).any():
+    #     mx = np.nan_to_num(mx, nan=-1)
+    # return mx
+    median = np.nanmedian(mx)
+    return np.where(np.isnan(mx), median, mx)
 
 def mode_impu(mx):
-    # df = pd.DataFrame(mx)
-    # for column in df.columns:
-    #     col_data = df[column]
-    #     if col_data.isna().all():
-    #         df[column] = -1
-    #     else:
-    #         non_nan_data = col_data.dropna()
-    #         mode_value = non_nan_data.mode().iloc[0]  # 更直接取众数
-    #         df[column] = col_data.fillna(mode_value)
-    # return df.values
     mx = mx.copy()
-    col_modes = stats.mode(mx, axis=0, nan_policy='omit').mode[0]
+    flat_values = mx[~np.isnan(mx)]  # 展平所有非NaN值
+    global_mode = stats.mode(flat_values, keepdims=False).mode
+    if np.isnan(global_mode):
+        global_mode = 0  # 兜底
     inds = np.where(np.isnan(mx))
-    mx[inds] = np.take(col_modes, inds[1])
-    if np.isnan(mx).any():
-        mx = np.nan_to_num(mx, nan=0)
+    mx[inds] = global_mode
     return mx
 
 def random_impu(mx):
-    # df = pd.DataFrame(mx)
-    # for column in df.columns:
-    #     col_data = df[column]
-    #     if col_data.isna().all():
-    #         df[column] = -1
-    #     else:
-    #         non_nan_data = col_data.dropna()
-    #         if not non_nan_data.empty:
-    #             random_value = np.random.choice(non_nan_data)
-    #             df[column] = col_data.fillna(random_value)
-    # return df.values
     mx = mx.copy()
-    for col in range(mx.shape[1]):
-        nan_mask = np.isnan(mx[:, col])
-        non_nan = mx[~nan_mask, col]
-        if non_nan.size > 0:
-            mx[nan_mask, col] = np.random.choice(non_nan, size=nan_mask.sum())
-        else:
-            mx[nan_mask, col] = -1
+    non_nan_values = mx[~np.isnan(mx)]  # 获取所有非缺失值（1D数组）
+    
+    if non_nan_values.size == 0:
+        # 整张表全是 NaN，兜底填 -1
+        mx[:] = -1
+        return mx
+
+    inds = np.where(np.isnan(mx))  # 找到所有 NaN 的位置
+    mx[inds] = np.random.choice(non_nan_values, size=len(inds[0]), replace=True)
     return mx
+
 
 def knn_impu(mx, k=5):
     mx = mx.copy()
-    imputer = KNNImputer(n_neighbors=k)
     all_nan_cols = np.all(np.isnan(mx), axis=0)
-    mx[:, all_nan_cols] = -1
+
+    # 计算全局均值（不为 NaN）
+    global_mean = np.nanmean(mx)
+
+    # 全空列先填全局均值，避免 KNNImputer 报错
+    mx[:, all_nan_cols] = global_mean
+
+    imputer = KNNImputer(n_neighbors=k)
     return imputer.fit_transform(mx)
 
 def ffill_impu(mx):
     mx = mx.copy()
     df = pd.DataFrame(mx)
-    df = df.ffill(axis=0)  # 沿着时间维度（行）前向填充
-    df = df.fillna(-1)     # 若第一行是 NaN 会残留未填，补-1
+    df = df.ffill(axis=0)
+
+    # 补全前几行未被填补的位置（例如第一行是 NaN）
+    global_mean = np.nanmean(mx)
+    df = df.fillna(global_mean)
+
     return df.values
 
 def bfill_impu(mx):
     mx = mx.copy()
     df = pd.DataFrame(mx)
-    df = df.bfill(axis=0)  # 沿着时间维度（行）后向填充
-    df = df.fillna(-1)     # 若最后一行是 NaN 会残留未填，补-1
+    df = df.bfill(axis=0)
+
+    # 补全最后几行未被填补的位置（例如最后一行是 NaN）
+    global_mean = np.nanmean(mx)
+    df = df.fillna(global_mean)
+
     return df.values
 
 def miracle_impu(mx):
     try:
+        global_mean = np.nanmean(mx)
         from miracle import MIRACLE
-        print("_____________1______________________")
         mx = mx.copy()
         
         # 检查是否有缺失值
@@ -131,8 +132,8 @@ def miracle_impu(mx):
         # 检查是否有整列都是NaN
         all_nan_cols = np.all(np.isnan(mx), axis=0)
         if all_nan_cols.any():
-            print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用0填充")
-            mx[:, all_nan_cols] = 0.0
+            print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用填充")
+            mx[:, all_nan_cols] = global_mean
         
         # 重新检查剩余的缺失值
         missing_idxs = np.where(np.any(np.isnan(mx), axis=0))[0]
@@ -202,6 +203,11 @@ def miracle_impu(mx):
 def saits_impu(mx, epochs=10, d_model=128, n_layers=2, n_heads=4, 
                d_k=32, d_v=32, d_ffn=64, dropout=0.4, device=None):
     from pypots.imputation import SAITS
+    global_mean = np.nanmean(mx)
+    all_nan_cols = np.all(np.isnan(mx), axis=0)
+    if all_nan_cols.any():
+        print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用填充")
+        mx[:, all_nan_cols] = global_mean
     # print("_____________2______________________")
     mx = mx.copy()
     n_steps, n_features = mx.shape
@@ -229,6 +235,11 @@ def saits_impu(mx, epochs=10, d_model=128, n_layers=2, n_heads=4,
 
 def timemixerpp_impu(mx):
     """TimeMixer++ 填补函数的修复版本"""
+    global_mean = np.nanmean(mx)
+    all_nan_cols = np.all(np.isnan(mx), axis=0)
+    if all_nan_cols.any():
+        print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用填充")
+        mx[:, all_nan_cols] = global_mean
     try:
         from pypots.imputation import TimeMixerpp
         
@@ -248,14 +259,24 @@ def timemixerpp_impu(mx):
         timemixer = TimeMixerpp(
             n_steps=mx.shape[0],
             n_features=mx.shape[1],
-            n_layers=16,  # 减少层数
-            d_model=32,  # 减少模型维度
-            n_heads=4,   # 减少注意力头数
-            epochs=50,   # 减少训练轮数
-            batch_size=32,
-            patience=1,
+            n_layers=1,       
+            d_model=8,      
+            d_ffn=8,          
+            n_heads=1,      
+            n_kernels=1,      
+            top_k=1,          
+            dropout=0.5,      
+            channel_mixing=False,        
+            channel_independence=False,   
+            downsampling_layers=0,       
+            apply_nonstationary_norm=False, 
+            epochs=5,         
+            patience=0,       
+            batch_size=128,   
+            verbose=False,   
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
+
         
         # 训练和填补
         timemixer.fit(train_data)
@@ -279,6 +300,11 @@ def tefn_impu(mx, epoch=10, device=None):
     from pypots.optim.adam import Adam
     from pypots.nn.modules.loss import MAE, MSE
     print("_____________4______________________")
+    global_mean = np.nanmean(mx)
+    all_nan_cols = np.all(np.isnan(mx), axis=0)
+    if all_nan_cols.any():
+        print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用填充")
+        mx[:, all_nan_cols] = global_mean
     mx = mx.copy()
     n_steps, n_features = mx.shape
 

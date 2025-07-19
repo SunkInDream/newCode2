@@ -8,9 +8,15 @@ from tqdm import tqdm
 import multiprocessing as mp 
 from models_TCDF import *
 import torch.nn.functional as F
-from pygrinder import block_missing
+from pygrinder import (
+    mcar,
+    mar_logistic,
+    mnar_x,
+)
+
 from sklearn.cluster import KMeans
 from baseline import *
+from scipy.stats import wasserstein_distance
 from models_downstream import *
 from multiprocessing import Process, Queue
 from models_TCN import MultiADDSTCN, ParallelFeatureADDSTCN, ADDSTCN
@@ -30,7 +36,7 @@ def FirstProcess(matrix, threshold=0.8):
                 df[column] = col_data.fillna(mode_value)
     return df.values
 
-def SecondProcess(matrix, perturbation_prob=0.1, perturbation_scale=0.1):
+def SecondProcess(matrix, perturbation_prob=0.3, perturbation_scale=0.3):
     df_copy = pd.DataFrame(matrix)
     for column in df_copy.columns:
         series = df_copy[column]
@@ -107,16 +113,19 @@ def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=No
     print('missing_count', np.isnan(original).sum())
     # 预处理
     first = FirstProcess(original.copy())
-    print('missing_count', np.isnan(first).sum())
+    # print('missing_count', np.isnan(first).sum())
     mask = (~np.isnan(first)).astype(int)
-    pd.DataFrame(mask).to_csv("mask_qian.csv", index=False)
+    # pd.DataFrame(mask).to_csv("mask_qian.csv", index=False)
     initial_filled = SecondProcess(first)
+    initial_filled_copy = initial_filled.copy()
     # 构造张量 (1, T, N)
-    x = torch.tensor(initial_filled.T[None, ...], dtype=torch.float32, device=device)
-    y = torch.tensor(initial_filled.T[None, ...], dtype=torch.float32, device=device)
-    m = torch.tensor(mask.T[None, ...], dtype=torch.float32, device=device)
-    gt = gt.T
+    x = torch.tensor(initial_filled[None, ...], dtype=torch.float32, device=device)
+    y = torch.tensor(initial_filled[None, ...], dtype=torch.float32, device=device)
+    m = torch.tensor(mask[None, ...], dtype=torch.float32, device=device)
+    gt = gt
+    # print("Y.shape", y.shape)
     # 创建模型
+    print("causal_matrix.shape", causal_matrix.shape)
     model = ParallelFeatureADDSTCN(
         causal_matrix=causal_matrix,
         model_params=model_params
@@ -143,53 +152,61 @@ def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=No
         # Loss1: 观测值的预测误差
         loss_1 = F.mse_loss(pred * m, y * m)
 
-        # ✅ 修复 Loss2: 针对缺失位置与gt的一致性
-        if ifGt and gt is not None:
-            # 构造 gt 张量，与 pred 格式一致
-            gt_tensor = torch.tensor(gt[None, ...], dtype=torch.float32, device=device)  # (1, T, N)
+        # # ✅ 修复 Loss2: 针对缺失位置与gt的一致性
+        # if ifGt and gt is not None:
+        #     # 构造 gt 张量，与 pred 格式一致
+        #     gt_tensor = torch.tensor(gt[None, ...], dtype=torch.float32, device=device)  # (1, T, N)
            
-            missing_mask = 1 - m  # 缺失位置的 mask
+        #     missing_mask = 1 - m  # 缺失位置的 mask
             
-            # 只计算缺失位置的损失
-            missing_count = missing_mask.sum()
-            if missing_count > 0:
-                loss_2 = F.mse_loss(pred * missing_mask, gt_tensor * missing_mask)
-                print('pred * missing_mask',pred* missing_mask)
-                print('gt_tensor * missing_mask',gt_tensor * missing_mask)
-            else: 
-                loss_2 = torch.tensor(0.0, device=device, requires_grad=True)
-        else:
-            loss_2 = torch.tensor(0.0, device=device, requires_grad=True)
+        #     # 只计算缺失位置的损失
+        #     missing_count = missing_mask.sum()
+        #     if missing_count > 0:
+        #         loss_2 = F.mse_loss(pred * missing_mask, gt_tensor * missing_mask)
+        #         print('pred * missing_mask',pred* missing_mask)
+        #         print('gt_tensor * missing_mask',gt_tensor * missing_mask)
+        #     else: 
+        #         loss_2 = torch.tensor(0.0, device=device, requires_grad=True)
+        # else:
+        #     loss_2 = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Loss3: 协方差矩阵对齐
-        pred_np = pred.squeeze(0).T
-        y_np = y.squeeze(0).T
-        if pred_np.shape[1] > 1:
-            try:
-                cov_pred = torch.cov(pred_np)
-                cov_y = torch.cov(y_np)
-                loss_3 = F.mse_loss(cov_pred, cov_y)
-            except:
-                loss_3 = torch.tensor(0.0, device=device, requires_grad=True)
-        else:
-            loss_3 = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Loss4: RBF核映射对齐
-        def rbf_kernel(mat, sigma=1.0):
-            if mat.shape[0] <= 1:
-                return torch.zeros((1, 1), device=mat.device, requires_grad=True)
-            dist = torch.cdist(mat, mat, p=2) ** 2
-            return torch.exp(-dist / (2 * sigma ** 2))
+        # Loss4: 统计分布
+        def statistical_alignment_loss(pred, y):
+            """
+            基于统计分布对齐的损失函数
+            """
+            pred_features = pred.squeeze(0)  # (T, N)
+            y_features = y.squeeze(0)       # (T, N)
+            
+            losses = []
+            
+            # 1. 均值对齐
+            pred_mean = pred_features.mean(dim=0)  # (N,)
+            y_mean = y_features.mean(dim=0)        # (N,)
+            mean_loss = F.mse_loss(pred_mean, y_mean)
+            losses.append(mean_loss)
+            
+            # 2. 标准差对齐
+            pred_std = pred_features.std(dim=0)    # (N,)
+            y_std = y_features.std(dim=0)          # (N,)
+            std_loss = F.mse_loss(pred_std, y_std)
+            losses.append(std_loss)
+            
+            # 3. 分位数对齐
+            quantiles = [0.25, 0.5, 0.75]
+            for q in quantiles:
+                pred_q = torch.quantile(pred_features, q, dim=0)
+                y_q = torch.quantile(y_features, q, dim=0)
+                q_loss = F.mse_loss(pred_q, y_q)
+                losses.append(q_loss)
+            
+            return sum(losses) / len(losses)
 
-        try:
-            K_pred = rbf_kernel(pred_np)
-            K_y = rbf_kernel(y_np)
-            loss_4 = F.mse_loss(K_pred, K_y)
-        except:
-            loss_4 = torch.tensor(0.0, device=device, requires_grad=True)
+        loss_3 = statistical_alignment_loss(pred, y)
 
         # 加权总损失（如需调整，修改权重）
-        total_loss = 0 * loss_1 + 1 * loss_2 + 0 * loss_3 + 0 * loss_4
+        total_loss = 0.6 * loss_1 + 0.4 * loss_3 
         print(f"[Epoch {epoch+1}/{epochs}] Total Loss: {total_loss.item():.6f}")
         total_loss.backward()
         opt.step()
@@ -205,11 +222,11 @@ def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=No
 
     # 用最优结果进行填补
     imputed = best_imputed
-    res = initial_filled.T.copy()
-    res[mask.T == 0] = imputed[mask.T == 0]
+    res = initial_filled.copy()
+    res[mask == 0] = imputed[mask == 0]
     pd.DataFrame(res).to_csv("result_1.csv", index=False)
      
-    return res, mask.T
+    return res, mask, initial_filled_copy
 
 
 # def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None, ifGt=False, gt=None):
@@ -433,20 +450,63 @@ def parallel_impute(file_path, causal_matrix, model_params, epochs=150, lr=0.02,
     return successful_results
 
 def agregate(initial_filled_array, n_cluster):
-    # Step 1: 每个样本按列取均值，构造聚类输入
-    data = np.array([np.nanmean(x, axis=0) for x in initial_filled_array])
-
-    # Step 2: KMeans 聚类
-    km = KMeans(n_clusters=n_cluster, n_init=10, random_state=0)
-    labels = km.fit_predict(data)
-
-    # Step 3: 逐类找代表样本，带进度条
+    """聚类并提取代表样本"""
+    data = np.array([matrix.flatten() for matrix in initial_filled_array])
+    
+    # ✅ 添加数据清理步骤
+    print(f"原始数据形状: {data.shape}")
+    print(f"原始数据范围: [{np.nanmin(data):.6e}, {np.nanmax(data):.6e}]")
+    
+    # 1. 检查并处理无穷大值
+    inf_mask = np.isinf(data)
+    if inf_mask.any():
+        print(f"发现 {inf_mask.sum()} 个无穷大值，将替换为有限值")
+        data[inf_mask] = np.nan
+    
+    # 2. 检查并处理 NaN 值
+    nan_mask = np.isnan(data)
+    if nan_mask.any():
+        print(f"发现 {nan_mask.sum()} 个 NaN 值，将用中位数填充")
+        # 用中位数填充 NaN
+        median_val = np.nanmedian(data)
+        data[nan_mask] = median_val
+    
+    # 3. 数据范围限制（避免数值过大）
+    # 使用分位数来限制极值
+    q1, q99 = np.percentile(data, [1, 99])
+    print(f"1%分位数: {q1:.6e}, 99%分位数: {q99:.6e}")
+    
+    # 将极值限制在合理范围内
+    data = np.clip(data, q1, q99)
+    
+    # 4. 标准化数据
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    data_scaled = scaler.fit_transform(data)
+    
+    print(f"清理后数据形状: {data_scaled.shape}")
+    print(f"清理后数据范围: [{data_scaled.min():.6f}, {data_scaled.max():.6f}]")
+    
+    # 5. 聚类
+    km = KMeans(n_clusters=n_cluster, random_state=42, n_init=10)
+    try:
+        labels = km.fit_predict(data_scaled)
+    except Exception as e:
+        print(f"聚类失败: {e}")
+        # 如果还是失败，使用随机采样
+        print("使用随机采样作为备选方案")
+        return np.random.choice(len(initial_filled_array), n_cluster, replace=False).tolist()
+    
+    print(f"聚类完成，标签分布: {np.bincount(labels)}")
+    
+    # 6. 选择每个簇的代表样本
     idx_arr = []
     for k in tqdm(range(n_cluster), desc="选择每簇代表样本"):
         idxs = np.where(labels == k)[0]
         if len(idxs) == 0:
             continue
-        cluster_data = data[idxs]
+        
+        cluster_data = data_scaled[idxs]
         dists = np.linalg.norm(cluster_data - km.cluster_centers_[k], axis=1)
         best_idx = idxs[np.argmin(dists)]
         idx_arr.append(int(best_idx))
@@ -504,15 +564,15 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
     #     else:
     #         top3 = np.argsort(col_values)[-3:]
     #         new_matrix[top3, col] = 1
-       # Step 5: 选 Top-5 构建最终因果图
+       # Step 5: 选 Top-4 构建最终因果图
     np.fill_diagonal(cg_total, 0)
     new_matrix = np.zeros_like(cg_total)
     for col in range(cg_total.shape[1]):
         col_values = cg_total[:, col]
-        if np.count_nonzero(col_values) < 5:
+        if np.count_nonzero(col_values) < 4:
             new_matrix[:, col] = 1
         else:
-            top5 = np.argsort(col_values)[-5:]
+            top5 = np.argsort(col_values)[-4:]
             new_matrix[top5, col] = 1
     return new_matrix
 
@@ -525,68 +585,49 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
 
     # ground truth
     gt = mx.copy()
-    gt2 = gt.T.copy()
+    gt2 = gt.copy()
     pd.DataFrame(gt).to_csv("1.csv", index=False)
     # 随机 mask 生成缺失
-    X = block_missing(mx[np.newaxis, ...], factor=0.1, block_width=15, block_len=10)[0]
+    X = mar_logistic(mx, obs_rate=0.2, missing_rate=0.1)
+    X = X[np.newaxis, ...]  # 增加一个维度
+    X = mnar_x(X, offset=0.05)
+    X = mcar(X, p=0.05)
+    X = X.squeeze(0)  # 去掉多余的维度
+    Mask = (~np.isnan(X)).astype(int)
     pd.DataFrame(X).to_csv("2.csv", index=False)
     # # mask: 观测为 1，缺失为 0
     # M = (~np.isnan(X)).astype(int)
     # missing_place = 1 - M
-
+    Mask = (~np.isnan(X)).astype(int)
     # 掩码版 MSE，只在缺失位置评估
     def mse(a, b, mask):
         a = torch.as_tensor(a, dtype=torch.float32, device=device)
         b = torch.as_tensor(b, dtype=torch.float32, device=device)
         mask = torch.as_tensor(mask, dtype=torch.float32, device=device)
         mask = 1- mask
-        # ✅ 计算逐个元素的误差
-        element_wise_error = (a - b) ** 2  # 保持原始形状
+        element_wise_error = (a - b) ** 2  
         
-        # # 输出逐个元素的误差值
-        # print("逐个元素的误差值:")
-        # print(element_wise_error)
         pd.DataFrame((element_wise_error*mask).cpu().numpy()).to_csv("element_wise_error.csv", index=False)
-        # pd.DataFrame(mask.cpu().numpy()).to_csv("mask.csv", index=False)
-        # import time
-        # time.sleep(5)
-        # # 如果你只想看缺失位置的误差
-        # missing_errors = element_wise_error[mask == 1]
-        # print("缺失位置的误差值:")
-        # print(missing_errors)
-        
+        pd.DataFrame(a.cpu().numpy()).to_csv("a.csv", index=False)
+        pd.DataFrame(b.cpu().numpy()).to_csv("b.csv", index=False)
+        pd.DataFrame(mask.cpu().numpy()).to_csv("mask.csv", index=False)
         pd.DataFrame((a*mask).cpu().numpy()).to_csv("a*c.csv", index=False)
         pd.DataFrame((b*mask).cpu().numpy()).to_csv("b*c.csv", index=False)
-        # pd.DataFrame(mask.cpu().numpy()).to_csv("c.csv", index=False)
-        # pd.DataFrame(missing_errors.cpu().numpy()).to_csv("missing_errors.csv", index=False)
-        # 返回平均MSE（如果需要的话）
-        return F.mse_loss(a * mask, b * mask).item()  # 只计算缺失位置的MSE
+        
+        # 计算 masked MSE
+        masked_error = F.mse_loss(a * mask, b * mask).item()
+
+        return masked_error
 
     res = {}
 
     # 我的模型评估
-    print("开始执行 my_model...")
-    imputed_result, mask = impute(X, causal_matrix,
+    # print("开始执行 my_model...")
+    imputed_result, mask, initial_processed = impute(X, causal_matrix,
                             model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
-                            epochs=150, lr=0.01, gpu_id=gpu_id, ifGt=True, gt=gt)
-
-    # # 保存结果
-    # if gpu_id == 0:
-    #     zero_result = zero_impu(X)
-    #     initial_processed = initial_process(X)
-    #     pd.DataFrame(gt).to_csv("gt_matrix.csv", index=False)
-    #     pd.DataFrame(imputed_result).to_csv("evaluate_result.csv", index=False)
-    #     pd.DataFrame(zero_result).to_csv("zero_impu_matrix.csv", index=False)
-    #     pd.DataFrame(initial_processed).to_csv("initial_process_matrix.csv", index=False)
-    #     print("✅ 已保存 gt_matrix.csv, my_model_matrix.csv, zero_impu_matrix.csv")
-    # print('imputed_result111', imputed_result)
-    # print('gt111', gt)
-    # pd.DataFrame(imputed_result).to_csv("imputed_result111.csv", index=False)
-    # pd.DataFrame(gt).to_csv("gt111.csv", index=False)
-    # pd.DataFrame(missing_place).to_csv("missing_place.csv", index=False)
+                            epochs=100, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt)
+    # print("imputed_result.shape", imputed_result.shape, "gt2.shape", gt2.shape, "mask.shape", mask.shape)
     res['my_model'] = mse(imputed_result, gt2, mask)
-    # res['initial_process'] = mse(initial_processed, gt, missing_place)
-    # 合理性检查函数
     def is_reasonable_mse(mse_value, threshold=10000.0):
         return (not np.isnan(mse_value) and 
                 not np.isinf(mse_value) and 
@@ -594,14 +635,16 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
 
     # baseline 方法
     baseline = [
-        # ('initial_process', initial_process),
-        # ('zero_impu', zero_impu), ('mean_impu', mean_impu),
-        # ('median_impu', median_impu), ('mode_impu', mode_impu),
-        # ('random_impu', random_impu), ('knn_impu', knn_impu),
-        # ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
-        # ('miracle_impu', miracle_impu), ('saits_impu', saits_impu),
-        # ('timemixerpp_impu', timemixerpp_impu), 
-        # ('tefn_impu', tefn_impu),
+        ('initial_process', initial_process),
+        ('zero_impu', zero_impu),
+        ('mean_impu', mean_impu),
+        ('median_impu', median_impu),
+        ('mode_impu', mode_impu),
+        ('random_impu', random_impu), ('knn_impu', knn_impu),
+        ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
+        ('miracle_impu', miracle_impu), ('saits_impu', saits_impu),
+        ('timemixerpp_impu', timemixerpp_impu), 
+        ('tefn_impu', tefn_impu),
     ]
 
     for name, fn in baseline:
@@ -611,7 +654,7 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
             print(f"❌ {name}: 填补结果包含异常大值 (max: {np.max(np.abs(result)):.2e})")
             res[name] = float('nan')
         else:
-            mse_value = mse(result, gt, mask)
+            mse_value = mse(result, gt, Mask)
             if is_reasonable_mse(mse_value):
                 res[name] = mse_value
                 print(f"✅ {name}: {mse_value:.6f}")

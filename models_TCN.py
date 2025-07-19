@@ -190,14 +190,13 @@ class ParallelFeatureADDSTCN(nn.Module):
         self.models = nn.ModuleList()
 
         for i in range(N):
-            causal_mask = causal_matrix[i]  # 该特征的因果父集
-            input_idx = np.where(causal_mask)[0].tolist() + [i]  # 自身 + 父集
-
+            causal_mask = causal_matrix[:, i]  # 现在提取的是第 i 列
+            input_idx = np.where(causal_mask)[0].tolist() + [i]  # 找到所有为 1 的行 + 自己
             self.models.append(
                 ADDSTCN(
                     target=i,
                     input_size=len(input_idx),
-                    cuda=cuda,  # ✅ 传递 cuda 参数
+                    cuda=cuda,  
                     **model_params
                 )
             )
@@ -215,7 +214,7 @@ class ParallelFeatureADDSTCN(nn.Module):
             x_input = x[:, :, input_idx]  # (B, T, len(input_idx))
             
             # ✅ 转置输入以匹配 ADDSTCN 的期望格式 (B, N, T)
-            x_input = x_input.transpose(1, 2)  # (B, len(input_idx), T)
+            x_input = x_input.transpose(1,2)  # (B, len(input_idx), T)
             
             out = model(x_input)  # (B, T, 1) - ADDSTCN 内部会转置回来
             outputs.append(out)  # append (B, T, 1)

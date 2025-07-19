@@ -1,6 +1,6 @@
 import os
 import glob
-
+import pandas as pd
 # def delete_impu_files():
 #     """删除当前目录下所有以impu开头的文件"""
 #     # 获取当前目录
@@ -31,3 +31,10 @@ import glob
 
 # if __name__ == "__main__":
 #     delete_impu_files()、
+df = pd.read_csv('./causality_matrices/finance_causality_matrix.csv', header=None)
+
+# 删除首行（第0行）和首列（第0列）
+df = df.drop(index=0, columns=0)
+
+# 保存处理后的CSV文件
+df.to_csv('./causality_matrices/finance_causality_matrix.csv', index=False, header=False)
