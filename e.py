@@ -335,21 +335,12 @@ def generate_fama_french_datasets_with_shared_graph(
 ):
     """
     生成多个金融时间序列数据表，数据不同，但使用同一个因果图。
-    
-    参数：
-        num_datasets: 要生成的数据表数量
-        T: 时间序列长度
-        num_assets: 资产变量数量
-        num_factors: 因子变量数量（如3）
-        num_edges: 因果图中边的数量
-        data_save_dir: 保存数据表的目录
-        graph_save_path: 保存因果图的 CSV 文件路径（如 "./graph.csv"）
-        seed: 随机种子（可复现）
     """
     if seed is not None:
         np.random.seed(seed)
     
     os.makedirs(data_save_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(graph_save_path), exist_ok=True)  # 确保目录存在
 
     total_vars = num_factors + num_assets
     col_names = [f"F{i}" for i in range(num_factors)] + [f"A{i}" for i in range(num_assets)]
@@ -364,23 +355,31 @@ def generate_fama_french_datasets_with_shared_graph(
             G[i, j] = 1
             edge_count += 1
 
-    # ✅ 保存因果图（只保存一次）
-    pd.DataFrame(G, index=False, columns=False).to_csv(graph_save_path)
+    # ✅ 修复：正确保存因果图
+    np.savetxt(graph_save_path, G, delimiter=',', fmt='%d')
     print(f"Saved causal graph to: {graph_save_path}")
 
-    # ✅ 用该图生成多个不同的数据表
+    decay = 0.8  # 控制记忆衰减
+    weight = 0.2  # 父节点影响权重
+    noise_std = 0.01  # 小扰动
+
     for d in range(num_datasets):
         X = np.zeros((T + 1, total_vars))
-        X[0] = np.random.normal(0, 0.1, size=total_vars)
+        X[0] = np.random.normal(0, 0.01, size=total_vars)  # 更小初始值
 
         for t in range(1, T + 1):
             for j in range(total_vars):
                 parents = np.where(G[:, j])[0]
-                for p in parents:
-                    X[t, j] += 0.5 * X[t - 1, p]
-                X[t, j] += np.random.normal(0, 0.05)
+                influence = sum(weight * X[t - 1, p] for p in parents)
+                raw_val = decay * X[t - 1, j] + influence + np.random.normal(0, noise_std)
+                # ✅ 激活函数抑制爆炸
+                X[t, j] = np.tanh(raw_val)  # 限制在 [-1, 1]
 
-        X = X[1:]  # 去掉初始时刻
+        X = X[1:]  # 去掉第一行
+
+        # 可选：缩放每列到标准差 0.1 左右（进一步抑制）
+        # X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-8) * 0.1
+
         save_path = os.path.join(data_save_dir, f"finance_dataset_{d}_timeseries.csv")
         pd.DataFrame(X, columns=col_names).to_csv(save_path, index=False)
         print(f"[{d+1}/{num_datasets}] Saved dataset to: {save_path}")
@@ -388,30 +387,30 @@ def generate_fama_french_datasets_with_shared_graph(
 # copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")
 # generate_sparse_matrix(50, 50, 3)
-# extract_balanced_samples(
-#     source_dir = "./ICU_Charts/",
-#     label_file = "./static_tag.csv",
-#     id_name = "ICUSTAY_ID",
-#     label_name = "DIEINHOSPITAL",
-#     target_dir = "./data/mimic",
-#     num_pos = 1000,
-#     num_neg = 1000,
-#     random_state = 33
-# )
+extract_balanced_samples(
+    source_dir = "./data/III",
+    label_file = "./AAAI_3_4_labels.csv",
+    id_name = "ICUSTAY_ID",
+    label_name = "DIEINHOSPITAL",
+    target_dir = "./data/mimic-iii",
+    num_pos = 300,
+    num_neg = 300,
+    random_state = 33
+)
 # generate_and_save_lorenz_datasets(num_datasets=1, p=100, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
-datasets = generate_var_datasets_with_fixed_structure(
-        num_datasets=1000,
-        p=100,
-        T=50, 
-        lag=4,
-        output_dir="./data/var",          # 时间序列数据保存目录
-        causality_dir="./causality_matrices", # 因果矩阵保存目录
-        sparsity=0.3,
-        beta_value=0.3,
-        auto_corr=0.6,
-        sd=0.3,
-        master_seed=33
-    )
+# datasets = generate_var_datasets_with_fixed_structure(
+#         num_datasets=12,
+#         p=100,
+#         T=50, 
+#         lag=4,
+#         output_dir="./data/var_test",          # 时间序列数据保存目录
+#         causality_dir="./causality_matrices", # 因果矩阵保存目录
+#         sparsity=0.3,
+#         beta_value=0.3,
+#         auto_corr=0.6,
+#         sd=0.3,
+#         master_seed=33
+#     )
 # generate_fama_french_datasets_with_shared_graph(
 #     num_datasets=1000,
 #     T=100,

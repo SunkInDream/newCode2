@@ -366,3 +366,69 @@ def tefn_impu(mx, epoch=10, device=None):
     result[missing_mask == 0] = imputed[missing_mask == 0]
 
     return result.cpu().numpy().squeeze()
+def timesnet_impu(mx):
+    import numpy as np
+    import torch
+    from pypots.imputation.timesnet import TimesNet  # 根据实际项目结构调整
+
+    # 复制原始数据
+    mx = mx.copy()
+    n_steps, n_features = mx.shape
+
+    # 记录全空列
+    all_nan_cols = np.all(np.isnan(mx), axis=0)
+
+    # 计算全局均值用于填补全空列
+    non_nan_values = mx[~np.isnan(mx)]
+    global_mean = np.mean(non_nan_values) if non_nan_values.size > 0 else 0.0
+
+    # 用全局均值填补全空列（完全 NaN 的列）
+    for i in range(n_features):
+        if all_nan_cols[i]:
+            mx[:, i] = global_mean
+
+    # 构造缺失掩码（注意此时已经没有全空列）
+    mask = ~np.isnan(mx)
+    mx_filled = np.nan_to_num(mx, nan=0.0)  # 其余 NaN 填 0，用作模型输入
+
+    # 初始化 TimesNet 模型
+    model = TimesNet(
+        n_steps=n_steps,
+        n_features=n_features,
+        n_layers=2,
+        top_k=3,
+        d_model=64,
+        d_ffn=128,
+        n_kernels=6,
+        dropout=0.1,
+        batch_size=1,
+        epochs=5,
+        patience=5,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        verbose=False,
+    )
+
+    # 构造输入数据
+    data = {
+        "X": mx_filled[None, ...],            # (1, T, N)
+        "missing_mask": mask[None, ...],      # (1, T, N)
+        "X_ori": mx[None, ...],               # 原始带缺失值
+        "indicating_mask": mask[None, ...],   # 与 missing_mask 相同
+    }
+
+    # 拟合模型
+    model.fit(data)
+
+    # 使用模型进行填补
+    imputed = model.predict({"X": mx_filled[None, ...], "missing_mask": mask[None, ...]})
+    return imputed["imputation"][0]  # 返回填补后的 (T, N) 矩阵
+
+def tsde_impu(mx, n_samples: int = 20, device: str = "cuda" if torch.cuda.is_available() else "cpu") -> np.ndarray:
+    from tsde import impute_missing_data
+    mx = mx.copy()
+    mx = impute_missing_data(
+            mx, 
+            n_samples=n_samples, 
+            device=device
+        )
+    return mx

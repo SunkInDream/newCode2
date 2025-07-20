@@ -49,13 +49,63 @@ def block_permute(series, block_size=24):
             permuted = np.concatenate([permuted, series[-remaining:]])
         return permuted
 
-def dynamic_lower_bound(scores, alpha=0.2, beta=1.0):
-        q = np.percentile(scores, (1 - alpha) * 100)
-        lower_quantile = np.where(scores >= q)[0][-1]
-        mean = np.mean(scores)
-        std = np.std(scores)
-        lower_std = np.where(scores >= min(scores[0], mean + beta * std))[0][-1]
-        return max(1, max(lower_quantile, lower_std))
+def dynamic_lower_bound(scores, alpha=0.15, beta=1.0):
+    """动态计算下界阈值 - 增强版"""
+    try:
+        if len(scores) == 0:
+            return 0.0
+        
+        # 转换为 numpy 数组并过滤有效值
+        scores = np.asarray(scores, dtype=float)
+        valid_scores = scores[np.isfinite(scores)]
+        
+        if len(valid_scores) == 0:
+            print("警告: 没有有效的因果分数，返回默认阈值 0.0")
+            return 0.0
+        
+        # 如果只有一个有效值
+        if len(valid_scores) == 1:
+            return float(valid_scores[0])
+        
+        # 排序
+        sorted_scores = np.sort(valid_scores)
+        
+        # 确保 alpha 在合理范围内
+        alpha = max(0.01, min(0.99, alpha))
+        
+        # 计算分位数
+        q = np.quantile(sorted_scores, 1 - alpha)
+        
+        # 查找大于等于分位数的索引
+        indices_above_q = np.where(sorted_scores >= q)[0]
+        
+        if len(indices_above_q) == 0:
+            # 降级处理：使用更低的分位数
+            print(f"警告: 无元素 >= {1-alpha:.2f} 分位数，尝试使用 0.5 分位数")
+            q = np.median(sorted_scores)
+            indices_above_q = np.where(sorted_scores >= q)[0]
+            
+            if len(indices_above_q) == 0:
+                # 最后的降级：使用最大值
+                print("警告: 使用最大值作为阈值")
+                return float(np.max(sorted_scores))
+        
+        # 计算动态下界
+        lower_quantile = indices_above_q[-1]
+        
+        if lower_quantile < len(sorted_scores) - 1:
+            lower_bound = sorted_scores[lower_quantile] + beta * (sorted_scores[-1] - sorted_scores[lower_quantile])
+        else:
+            lower_bound = sorted_scores[lower_quantile]
+        
+        return float(lower_bound)
+        
+    except Exception as e:
+        print(f"dynamic_lower_bound 计算失败: {e}")
+        print(f"scores 统计: min={np.min(scores) if len(scores) > 0 else 'N/A'}, "
+              f"max={np.max(scores) if len(scores) > 0 else 'N/A'}, "
+              f"length={len(scores)}")
+        return 0.0
 
 def run_single_task(args): 
     import math

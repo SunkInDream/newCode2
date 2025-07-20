@@ -13,14 +13,14 @@ model_params = {
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
-    data_arr = Prepare_data('./data/var')
-    cg = causal_discovery(data_arr, 20, isStandard=False, standard_cg='./causality_matrices/lorenz_causality_matrix.csv')
+    data_arr = Prepare_data('./data/var_test')
+    cg = causal_discovery(data_arr, 20, isStandard=True, standard_cg='./causality_matrices/var_causality_matrix.csv')
 
     # pd.DataFrame(cg).to_csv('./causality_matrices/my_lorenz_causality_matrix.csv', index=False, header=False)
     # res = evaluate_causal_discovery_from_file('./causality_matrices/my_lorenz_causality_matrix.csv', './causality_matrices/lorenz_causality_matrix.csv')
     # print(res)
 
-    # res = parallel_impute('./data/mimic-iii/III', cg, model_params, epochs=150, lr=0.02)
+    # res = parallel_impute('./data/mimic-iii', cg, model_params, epochs=100, lr=0.02, output_dir='./data_imputed/my_model/mimic-iii')
     parallel_mse_evaluate(data_arr, cg)
 
     # data_arr1, label_arr1 = Prepare_data('./data_imputed/my_model/mimic-iii', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')

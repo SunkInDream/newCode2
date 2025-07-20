@@ -1,6 +1,7 @@
 import os
 import torch
 import random
+import gc
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -16,114 +17,85 @@ from pygrinder import (
 
 from sklearn.cluster import KMeans
 from baseline import *
+from multiprocessing import set_start_method
 from scipy.stats import wasserstein_distance
 from models_downstream import *
 from multiprocessing import Process, Queue
 from models_TCN import MultiADDSTCN, ParallelFeatureADDSTCN, ADDSTCN
 
 def FirstProcess(matrix, threshold=0.8):
-    df = pd.DataFrame(matrix)
-    for column in df.columns:
-        col_data = df[column]
-        if col_data.isna().all():
-            df[column] = -1
-        else:
-            non_nan_data = col_data.dropna()
-            value_counts = non_nan_data.value_counts()
-            mode_value = value_counts.index[0]
-            mode_count = value_counts.iloc[0]
-            if mode_count >= threshold * len(non_nan_data):
-                df[column] = col_data.fillna(mode_value)
-    return df.values
+    matrix = np.array(matrix, dtype=np.float32)
+    
+    # 第一阶段：处理空列和高重复列
+    for col_idx in range(matrix.shape[1]):
+        col_data = matrix[:, col_idx]
+        
+        if np.isnan(col_data).all():
+            matrix[:, col_idx] = -1
+            continue
+            
+        valid_mask = ~np.isnan(col_data)
+        if not valid_mask.any():
+            continue
+            
+        valid_data = col_data[valid_mask]
+        unique_vals, counts = np.unique(valid_data, return_counts=True)
+        max_count_idx = np.argmax(counts)
+        mode_value = unique_vals[max_count_idx]
+        mode_count = counts[max_count_idx]
+        
+        if mode_count >= threshold * len(valid_data):
+            matrix[np.isnan(col_data), col_idx] = mode_value
+    return matrix
 
 def SecondProcess(matrix, perturbation_prob=0.3, perturbation_scale=0.3):
-    df_copy = pd.DataFrame(matrix)
-    for column in df_copy.columns:
-        series = df_copy[column]
-        missing_mask = series.isna()
-
+    for col_idx in range(matrix.shape[1]):
+        col_data = matrix[:, col_idx]
+        missing_mask = np.isnan(col_data)
+        
         if not missing_mask.any():
-            continue  # 如果没有缺失值，跳过该列
-        missing_segments = []
-        start_idx = None
-
-        # 查找缺失值的连续段
-        for i, is_missing in enumerate(missing_mask):
-            if is_missing and start_idx is None:
-                start_idx = i
-            elif not is_missing and start_idx is not None:
-                missing_segments.append((start_idx, i - 1))
-                start_idx = None
-        if start_idx is not None:
-            missing_segments.append((start_idx, len(missing_mask) - 1))
-
-        # 对每个缺失段进行填补
-        for start, end in missing_segments:
-            left_value, right_value = None, None
-            left_idx, right_idx = start - 1, end + 1
-
-            # 找到前后最近的非缺失值
-            while left_idx >= 0 and np.isnan(series.iloc[left_idx]):
-                left_idx -= 1
-            if left_idx >= 0:
-                left_value = series.iloc[left_idx]
-
-            while right_idx < len(series) and np.isnan(series.iloc[right_idx]):
-                right_idx += 1
-            if right_idx < len(series):
-                right_value = series.iloc[right_idx]
-
-            # 如果前后都没有非缺失值，使用均值填充
-            if left_value is None and right_value is None:
-                fill_value = series.dropna().mean()
-                df_copy.loc[missing_mask, column] = fill_value
-                continue
-
-            # 如果只有一个方向有非缺失值，使用另一个方向的值填充
-            if left_value is None:
-                left_value = right_value
-            elif right_value is None:
-                right_value = left_value
-
-            # 使用等差数列填补缺失值
-            segment_length = end - start + 1
-            step = (right_value - left_value) / (segment_length + 1)
-            values = [left_value + step * (i + 1) for i in range(segment_length)]
-
-            # 添加扰动
-            value_range = np.abs(right_value - left_value) or (np.abs(left_value) * 0.1 if left_value != 0 else 1.0)
-            for i in range(len(values)):
-                if random.random() < perturbation_prob:
-                    perturbation = random.uniform(-1, 1) * perturbation_scale * value_range
-                    values[i] += perturbation
-
-            # 将填补后的值赋回数据框
-            for i, value in enumerate(values):
-                df_copy.iloc[start + i, df_copy.columns.get_loc(column)] = value
-
-    return df_copy.values.astype(np.float32)
+            continue
+        
+        series = pd.Series(col_data)
+        interpolated = series.interpolate(method='linear', limit_direction='both').values
+        
+        if np.isnan(interpolated).any():
+            interpolated[np.isnan(interpolated)] = np.nanmean(col_data)
+        
+        # 添加扰动
+        missing_indices = np.where(missing_mask)[0]
+        if len(missing_indices) > 0 and perturbation_prob > 0:
+            n_perturb = int(len(missing_indices) * perturbation_prob)
+            if n_perturb > 0:
+                perturb_indices = np.random.choice(missing_indices, n_perturb, replace=False)
+                value_range = np.ptp(col_data[~missing_mask]) or 1.0
+                perturbations = np.random.uniform(-1, 1, n_perturb) * perturbation_scale * value_range
+                interpolated[perturb_indices] += perturbations
+        
+        matrix[:, col_idx] = interpolated
+    
+    return matrix.astype(np.float32)  # ✅ 修复：移到循环外面
 
 def initial_process(matrix, threshold=0.8, perturbation_prob=0.1, perturbation_scale=0.1):
     matrix = FirstProcess(matrix, threshold)
     matrix = SecondProcess(matrix, perturbation_prob, perturbation_scale)
     return matrix
 
-def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None, ifGt=False, gt=None):
+def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=None, ifGt=False, gt=None):
     device = torch.device(f'cuda:{gpu_id}' if gpu_id is not None and torch.cuda.is_available() else 'cpu')
     print('missing_count', np.isnan(original).sum())
+    
     # 预处理
     first = FirstProcess(original.copy())
-    # print('missing_count', np.isnan(first).sum())
     mask = (~np.isnan(first)).astype(int)
-    # pd.DataFrame(mask).to_csv("mask_qian.csv", index=False)
     initial_filled = SecondProcess(first)
     initial_filled_copy = initial_filled.copy()
-    # 构造张量 (1, T, N)
+    
+    # 使用float32确保兼容性
     x = torch.tensor(initial_filled[None, ...], dtype=torch.float32, device=device)
     y = torch.tensor(initial_filled[None, ...], dtype=torch.float32, device=device)
     m = torch.tensor(mask[None, ...], dtype=torch.float32, device=device)
-    gt = gt
-    # print("Y.shape", y.shape)
+    
     # 创建模型
     print("causal_matrix.shape", causal_matrix.shape)
     model = ParallelFeatureADDSTCN(
@@ -131,101 +103,116 @@ def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=No
         model_params=model_params
     ).to(device)
 
+    # 编译加速
+    if hasattr(torch, 'compile'):
+        try:
+            model = torch.compile(model, mode='reduce-overhead')
+        except:
+            pass
+
     opt = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=lr*0.01)
+    scaler = torch.cuda.amp.GradScaler() if device.type == 'cuda' and torch.cuda.is_available() else None
 
-    # ✅ 创建学习率调度器
-    def lr_lambda(epoch):
-        if epoch < 50:
-            return 1.0  # 前50个epoch使用原始学习率
-        else:
-            return 1.0  # 后100个epoch使用0.3倍学习率 (0.01 * 0.3 = 0.003)
-    
-    scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
-
+    # 早停机制
     best_loss = float('inf')
     best_imputed = None
+    patience = 15
+    no_improve_count = 0
+    
+    # 预计算统计量
+    y_mean = y.mean(dim=1, keepdim=True)
+    y_std = y.std(dim=1, keepdim=True)
+    quantiles = [0.25, 0.5, 0.75]
+    y_quantiles = [torch.quantile(y.float(), q, dim=1, keepdim=True) for q in quantiles]  # ✅ 确保float32
 
     for epoch in range(epochs):
         opt.zero_grad()
-        pred = model(x)  # (1, T, N)
-
-        # Loss1: 观测值的预测误差
-        loss_1 = F.mse_loss(pred * m, y * m)
-
-        # # ✅ 修复 Loss2: 针对缺失位置与gt的一致性
-        # if ifGt and gt is not None:
-        #     # 构造 gt 张量，与 pred 格式一致
-        #     gt_tensor = torch.tensor(gt[None, ...], dtype=torch.float32, device=device)  # (1, T, N)
-           
-        #     missing_mask = 1 - m  # 缺失位置的 mask
-            
-        #     # 只计算缺失位置的损失
-        #     missing_count = missing_mask.sum()
-        #     if missing_count > 0:
-        #         loss_2 = F.mse_loss(pred * missing_mask, gt_tensor * missing_mask)
-        #         print('pred * missing_mask',pred* missing_mask)
-        #         print('gt_tensor * missing_mask',gt_tensor * missing_mask)
-        #     else: 
-        #         loss_2 = torch.tensor(0.0, device=device, requires_grad=True)
-        # else:
-        #     loss_2 = torch.tensor(0.0, device=device, requires_grad=True)
-
-
-        # Loss4: 统计分布
-        def statistical_alignment_loss(pred, y):
-            """
-            基于统计分布对齐的损失函数
-            """
-            pred_features = pred.squeeze(0)  # (T, N)
-            y_features = y.squeeze(0)       # (T, N)
-            
-            losses = []
-            
-            # 1. 均值对齐
-            pred_mean = pred_features.mean(dim=0)  # (N,)
-            y_mean = y_features.mean(dim=0)        # (N,)
-            mean_loss = F.mse_loss(pred_mean, y_mean)
-            losses.append(mean_loss)
-            
-            # 2. 标准差对齐
-            pred_std = pred_features.std(dim=0)    # (N,)
-            y_std = y_features.std(dim=0)          # (N,)
-            std_loss = F.mse_loss(pred_std, y_std)
-            losses.append(std_loss)
-            
-            # 3. 分位数对齐
-            quantiles = [0.25, 0.5, 0.75]
-            for q in quantiles:
-                pred_q = torch.quantile(pred_features, q, dim=0)
-                y_q = torch.quantile(y_features, q, dim=0)
-                q_loss = F.mse_loss(pred_q, y_q)
-                losses.append(q_loss)
-            
-            return sum(losses) / len(losses)
-
-        loss_3 = statistical_alignment_loss(pred, y)
-
-        # 加权总损失（如需调整，修改权重）
-        total_loss = 0.6 * loss_1 + 0.4 * loss_3 
-        print(f"[Epoch {epoch+1}/{epochs}] Total Loss: {total_loss.item():.6f}")
-        total_loss.backward()
-        opt.step()
         
-        # ✅ 更新学习率
+        if scaler:
+            with torch.cuda.amp.autocast():
+                pred = model(x)
+                
+                # Loss1: 观测值的预测误差
+                loss_1 = F.mse_loss(pred * m, y * m)
+                
+                # ✅ 修复：确保pred是float32类型用于统计计算
+                pred_float = pred.float()  # 明确转换为float32
+                
+                pred_mean = pred_float.mean(dim=1, keepdim=True)
+                pred_std = pred_float.std(dim=1, keepdim=True)
+                
+                mean_loss = F.mse_loss(pred_mean, y_mean)
+                std_loss = F.mse_loss(pred_std, y_std)
+                
+                # ✅ 修复：使用float32版本计算分位数
+                quantile_losses = []
+                for i, q in enumerate(quantiles):
+                    pred_q = torch.quantile(pred_float, q, dim=1, keepdim=True)
+                    quantile_losses.append(F.mse_loss(pred_q, y_quantiles[i]))
+                
+                loss_3 = (mean_loss + std_loss + sum(quantile_losses)) / (2 + len(quantiles))
+                total_loss = 0.6 * loss_1 + 0.4 * loss_3
+            
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(opt)
+            scaler.update()
+        else:
+            # 普通训练
+            pred = model(x)
+            
+            loss_1 = F.mse_loss(pred * m, y * m)
+            
+            # ✅ 确保pred是float32类型
+            pred_float = pred.float()
+            
+            pred_mean = pred_float.mean(dim=1, keepdim=True)
+            pred_std = pred_float.std(dim=1, keepdim=True)
+            
+            mean_loss = F.mse_loss(pred_mean, y_mean)
+            std_loss = F.mse_loss(pred_std, y_std)
+            
+            quantile_losses = []
+            for i, q in enumerate(quantiles):
+                pred_q = torch.quantile(pred_float, q, dim=1, keepdim=True)  # ✅ 使用float版本
+                quantile_losses.append(F.mse_loss(pred_q, y_quantiles[i]))
+            
+            loss_3 = (mean_loss + std_loss + sum(quantile_losses)) / (2 + len(quantiles))
+            total_loss = 0.6 * loss_1 + 0.4 * loss_3
+            
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            opt.step()
+        
         scheduler.step()
 
-        # 保存最佳预测结果
-        if total_loss.item() < best_loss:
-            best_loss = total_loss.item()
+        # 早停检查
+        current_loss = total_loss.item()
+        if current_loss < best_loss:
+            best_loss = current_loss
+            no_improve_count = 0
             with torch.no_grad():
-                best_imputed = model(x).cpu().squeeze(0).numpy()
+                best_imputed = model(x).float().cpu().squeeze(0).numpy()  # ✅ 确保转换为float32
+        else:
+            no_improve_count += 1
+            if no_improve_count >= patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
+
+        # 减少打印频率和显存清理
+        if epoch % 2 == 0:
+            print(f"[Epoch {epoch+1}/{epochs}] Loss: {current_loss:.6f}, LR: {scheduler.get_last_lr()[0]:.6f}")
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
 
     # 用最优结果进行填补
-    imputed = best_imputed
     res = initial_filled.copy()
-    res[mask == 0] = imputed[mask == 0]
+    if best_imputed is not None:
+        res[mask == 0] = best_imputed[mask == 0]
+    
     pd.DataFrame(res).to_csv("result_1.csv", index=False)
-     
     return res, mask, initial_filled_copy
 
 
@@ -390,123 +377,158 @@ def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=No
 
 #     return final_filled
 
+def impute_wrapper(task_queue, result_queue, causal_matrix, model_params, epochs, lr, output_dir):
+    while True:
+        task = task_queue.get()
+        if task is None:
+            break
+        idx, file_path, gpu_id = task
 
-def impute_single_file(file_path, causal_matrix, model_params, epochs=100, lr=0.01, gpu_id=None):
-    """单文件填补函数，用于进程池"""
-    # # 设置GPU
-    # if gpu_id != 'cpu' and torch.cuda.is_available():
-    #     torch.cuda.set_device(gpu_id)
-    #     device = torch.device(f'cuda:{gpu_id}')
-    # else:
-    #     device = torch.device('cpu')
-    
-    # 读取数据
-    data = pd.read_csv(file_path).values.astype(np.float32)
-    filename = os.path.basename(file_path)
-        
-    # 调用优化后的impute函数
-    result = impute(data, causal_matrix, model_params, epochs=epochs, lr=lr, gpu_id=gpu_id)
-    return filename, result
+        try:
+            if gpu_id is not None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-def parallel_impute(file_path, causal_matrix, model_params, epochs=150, lr=0.02, simultaneous_per_gpu=2, max_workers=None):
-    """使用进程池的并行填补"""
-    # 获取文件列表
-    file_list = [os.path.join(file_path, f) for f in os.listdir(file_path) if f.endswith(".csv")]
-    
-    # 确定工作进程数和GPU分配
+            df = pd.read_csv(file_path)
+            data = df.values.astype(np.float32)
+
+            imputed, mask, initial = impute(data, causal_matrix, model_params, epochs, lr, gpu_id=0)
+
+            # 构造保存路径
+            filename = os.path.basename(file_path).replace('.csv', '_imputed.csv')
+            save_path = os.path.join(output_dir, filename)
+            pd.DataFrame(imputed).to_csv(save_path, index=False)
+
+            result_queue.put((idx, file_path, save_path))
+        except Exception as e:
+            result_queue.put((idx, file_path, f"Error: {e}"))
+
+
+def parallel_impute(
+    file_paths,  # 这个参数应该改名为 data_dir 更清楚
+    causal_matrix,
+    model_params,
+    epochs=150,
+    lr=0.02,
+    simultaneous_per_gpu=2,
+    max_workers=None,
+    output_dir="imputed_results"
+):
+    try:
+        set_start_method('spawn')
+    except RuntimeError:
+        pass
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ✅ 修复：正确处理输入路径
+    if isinstance(file_paths, str) and os.path.isdir(file_paths):
+        # 如果传入的是目录路径，获取所有CSV文件
+        file_list = [os.path.join(file_paths, f) for f in os.listdir(file_paths) if f.endswith('.csv')]
+        print(f"从目录 '{file_paths}' 找到 {len(file_list)} 个CSV文件")
+    elif isinstance(file_paths, list):
+        # 如果传入的是文件列表
+        file_list = file_paths
+        print(f"收到文件列表，共 {len(file_list)} 个文件")
+    else:
+        raise ValueError("file_paths must be a directory path or list of file paths")
+
+    if len(file_list) == 0:
+        print("❌ 错误: 没有找到任何CSV文件")
+        return {}
+
+    # ✅ 添加调试信息
+    print(f"输出目录: {output_dir}")
+    print(f"前3个文件: {file_list[:3]}")
+
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
-        max_workers = max_workers or os.cpu_count()
-        gpu_ids = ['cpu'] * len(file_list)
+        print("⚠️ 警告: 未检测到GPU，使用CPU模式")
+        # CPU模式下也可以运行，不要抛出错误
+        total_workers = min(4, len(file_list))  # CPU模式限制进程数
     else:
-        # 每个GPU运行simultaneous_per_gpu个进程以提高利用率
-        max_workers = max_workers or (num_gpus * simultaneous_per_gpu)
-        gpu_ids = [i % num_gpus for i in range(len(file_list))]
-    
-    print(f"使用 {max_workers} 个进程并行处理 {len(file_list)} 个文件")
-    
-    # 准备参数列表
-    args_list = [(file_path, causal_matrix, model_params, epochs, lr, gpu_id) 
-                 for file_path, gpu_id in zip(file_list, gpu_ids)]
-    
-    # 并行执行
-    with Pool(processes=max_workers) as pool:
-        results = list(tqdm(
-            pool.starmap(impute_single_file, args_list),
-            total=len(file_list),
-            desc="批量填补中",
-            ncols=80
-        ))
-    
-    # 保存结果
-    os.makedirs("./data_imputed/my_model/mimic-iii", exist_ok=True)
-    successful_results = []
-    
-    for filename, result in results:
-        successful_results.append(result)
-        pd.DataFrame(result).to_csv(f"./data_imputed/my_model/mimic-iii/{filename}", index=False)
-    
-    print(f"成功填补 {len(successful_results)}/{len(file_list)} 个文件")
-    return successful_results
+        total_workers = num_gpus * simultaneous_per_gpu
+        
+    if max_workers:
+        total_workers = min(total_workers, max_workers)
 
+    print(f"总工作进程数: {total_workers}")
+
+    task_queue = Queue()
+    result_queue = Queue()
+
+    # 添加任务 - 使用正确的文件列表
+    for idx, file_path in enumerate(file_list):  # ✅ 使用 file_list 而不是 file_paths
+        assigned_gpu = idx % num_gpus if num_gpus > 0 else None
+        task_queue.put((idx, file_path, assigned_gpu))
+        
+        # ✅ 添加调试信息
+        if idx < 5:
+            print(f"任务 {idx}: {file_path} -> GPU {assigned_gpu}")
+
+    # 添加终止信号
+    for _ in range(total_workers):
+        task_queue.put(None)
+
+    # 启动 workers
+    workers = []
+    for worker_id in range(total_workers):
+        p = Process(
+            target=impute_wrapper,
+            args=(task_queue, result_queue, causal_matrix, model_params, epochs, lr, output_dir)
+        )
+        p.start()
+        workers.append(p)
+        print(f"启动工作进程 {worker_id+1}/{total_workers}")
+
+    results = {}
+    completed_count = 0
+    
+    # ✅ 修复进度条 - 使用正确的总数
+    with tqdm(total=len(file_list), desc="Imputing and Saving") as pbar:
+        for _ in range(len(file_list)):  # ✅ 使用 file_list 的长度
+            idx, path, result = result_queue.get()
+            results[path] = result
+            completed_count += 1
+            
+            # ✅ 添加详细的结果信息
+            if isinstance(result, str) and result.startswith("Error"):
+                print(f"❌ 文件 {os.path.basename(path)} 失败: {result}")
+            else:
+                print(f"✅ 文件 {os.path.basename(path)} 完成: {result}")
+            
+            pbar.update(1)
+
+    # 等待所有进程完成
+    for p in workers:
+        p.join()
+
+    print(f"总体完成情况: {completed_count}/{len(file_list)} 个文件")
+    
+    # ✅ 检查输出目录
+    if os.path.exists(output_dir):
+        output_files = [f for f in os.listdir(output_dir) if f.endswith('.csv')]
+        print(f"输出目录 '{output_dir}' 中有 {len(output_files)} 个文件")
+        if len(output_files) > 0:
+            print(f"前3个输出文件: {output_files[:3]}")
+    else:
+        print(f"❌ 输出目录 '{output_dir}' 不存在")
+
+    return results
 def agregate(initial_filled_array, n_cluster):
-    """聚类并提取代表样本"""
-    data = np.array([matrix.flatten() for matrix in initial_filled_array])
-    
-    # ✅ 添加数据清理步骤
-    print(f"原始数据形状: {data.shape}")
-    print(f"原始数据范围: [{np.nanmin(data):.6e}, {np.nanmax(data):.6e}]")
-    
-    # 1. 检查并处理无穷大值
-    inf_mask = np.isinf(data)
-    if inf_mask.any():
-        print(f"发现 {inf_mask.sum()} 个无穷大值，将替换为有限值")
-        data[inf_mask] = np.nan
-    
-    # 2. 检查并处理 NaN 值
-    nan_mask = np.isnan(data)
-    if nan_mask.any():
-        print(f"发现 {nan_mask.sum()} 个 NaN 值，将用中位数填充")
-        # 用中位数填充 NaN
-        median_val = np.nanmedian(data)
-        data[nan_mask] = median_val
-    
-    # 3. 数据范围限制（避免数值过大）
-    # 使用分位数来限制极值
-    q1, q99 = np.percentile(data, [1, 99])
-    print(f"1%分位数: {q1:.6e}, 99%分位数: {q99:.6e}")
-    
-    # 将极值限制在合理范围内
-    data = np.clip(data, q1, q99)
-    
-    # 4. 标准化数据
-    from sklearn.preprocessing import StandardScaler
-    scaler = StandardScaler()
-    data_scaled = scaler.fit_transform(data)
-    
-    print(f"清理后数据形状: {data_scaled.shape}")
-    print(f"清理后数据范围: [{data_scaled.min():.6f}, {data_scaled.max():.6f}]")
-    
-    # 5. 聚类
-    km = KMeans(n_clusters=n_cluster, random_state=42, n_init=10)
-    try:
-        labels = km.fit_predict(data_scaled)
-    except Exception as e:
-        print(f"聚类失败: {e}")
-        # 如果还是失败，使用随机采样
-        print("使用随机采样作为备选方案")
-        return np.random.choice(len(initial_filled_array), n_cluster, replace=False).tolist()
-    
-    print(f"聚类完成，标签分布: {np.bincount(labels)}")
-    
-    # 6. 选择每个簇的代表样本
+    # Step 1: 每个样本按列取均值，构造聚类输入
+    data = np.array([np.nanmean(x, axis=0) for x in initial_filled_array])
+
+    # Step 2: KMeans 聚类
+    km = KMeans(n_clusters=n_cluster, n_init=10, random_state=0)
+    labels = km.fit_predict(data)
+
+    # Step 3: 逐类找代表样本，带进度条
     idx_arr = []
     for k in tqdm(range(n_cluster), desc="选择每簇代表样本"):
         idxs = np.where(labels == k)[0]
         if len(idxs) == 0:
             continue
-        
-        cluster_data = data_scaled[idxs]
+        cluster_data = data[idxs]
         dists = np.linalg.norm(cluster_data - km.cluster_centers_[k], axis=1)
         best_idx = idxs[np.argmin(dists)]
         idx_arr.append(int(best_idx))
@@ -528,10 +550,17 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
             raise ValueError("standard_cg must be provided when isStandard is True")
         return pd.read_csv(standard_cg, header=None).values
 
-    # Step 1: 预处理
-    initial_matrix_arr = original_matrix_arr.copy()
-    for i in tqdm(range(len(initial_matrix_arr)), desc="预处理样本"):
-        initial_matrix_arr[i] = initial_process(initial_matrix_arr[i])
+    # Step 1: 批量预处理
+    initial_matrix_arr = []
+    batch_size = 100
+    
+    for i in tqdm(range(0, len(original_matrix_arr), batch_size), desc="批量预处理"):
+        batch = original_matrix_arr[i:i+batch_size]
+        batch_results = [initial_process(matrix) for matrix in batch]
+        initial_matrix_arr.extend(batch_results)
+        
+        if i % (batch_size * 5) == 0:
+            gc.collect()
 
     # Step 2: 聚类并提取代表样本
     idx_arr = agregate(initial_matrix_arr, n_cluster)
@@ -644,7 +673,8 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
         ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
         ('miracle_impu', miracle_impu), ('saits_impu', saits_impu),
         ('timemixerpp_impu', timemixerpp_impu), 
-        ('tefn_impu', tefn_impu),
+        ('tefn_impu', tefn_impu),('timesnet_impu', timesnet_impu),
+        ('tsde_impu', tsde_impu)
     ]
 
     for name, fn in baseline:
