@@ -368,7 +368,6 @@ def tefn_impu(mx, epoch=10, device=None):
     return result.cpu().numpy().squeeze()
 def timesnet_impu(mx):
     import numpy as np
-    import torch
     from pypots.imputation.timesnet import TimesNet  # 根据实际项目结构调整
 
     # 复制原始数据
@@ -396,10 +395,10 @@ def timesnet_impu(mx):
         n_steps=n_steps,
         n_features=n_features,
         n_layers=2,
-        top_k=3,
-        d_model=64,
-        d_ffn=128,
-        n_kernels=6,
+        top_k=2,
+        d_model=4,
+        d_ffn=8,
+        n_kernels=2,
         dropout=0.1,
         batch_size=1,
         epochs=5,
@@ -432,3 +431,64 @@ def tsde_impu(mx, n_samples: int = 20, device: str = "cuda" if torch.cuda.is_ava
             device=device
         )
     return mx
+
+def grin_impu(mx):
+    """GRIN填补方法 - 低内存版本"""
+    from grin import grin_impute_low_memory
+    try:
+        mx = mx.copy()
+        seq_len, n_features = mx.shape
+        
+        print(f"原始缺失值: {np.isnan(mx).sum()}")
+        
+        # ✅ 放宽限制条件，但保持低内存
+        if seq_len < 10:
+            print("⚠️ 序列太短，使用均值填补")
+            return mean_impu(mx)
+        
+        # 根据数据大小调整参数
+        total_size = seq_len * n_features
+        
+        if total_size > 50000:  # 大数据集
+            window_size = min(10, seq_len // 10)
+            hidden_dim = min(8, max(4, n_features // 10))
+            epochs = 3
+            print(f"🔧 大数据集模式: window={window_size}, hidden={hidden_dim}")
+        elif total_size > 10000:  # 中等数据集
+            window_size = min(15, seq_len // 8) 
+            hidden_dim = min(16, max(8, n_features // 8))
+            epochs = 5
+            print(f"🔧 中等数据集模式: window={window_size}, hidden={hidden_dim}")
+        else:  # 小数据集
+            window_size = min(20, seq_len // 4)
+            hidden_dim = min(32, max(16, n_features // 4))
+            epochs = 10
+            print(f"🔧 小数据集模式: window={window_size}, hidden={hidden_dim}")
+        
+        # 调用低内存版GRIN
+        from grin import grin_impute_low_memory
+        result = grin_impute_low_memory(
+            mx, 
+            window_size=window_size,
+            hidden_dim=hidden_dim,
+            epochs=epochs,
+            lr=0.005
+        )
+        
+        # 验证填补结果
+        if np.isnan(result).any():
+            print("🔄 GRIN部分填补，补充均值填补")
+            # 只对剩余缺失值用均值填补
+            remaining_nan = np.isnan(result)
+            col_means = np.nanmean(mx, axis=0)
+            for j in range(n_features):
+                if remaining_nan[:, j].any():
+                    if not np.isnan(col_means[j]):
+                        result[remaining_nan[:, j], j] = col_means[j]
+                    else:
+                        result[remaining_nan[:, j], j] = 0
+        
+        return result
+        
+    except Exception as e:
+        return mean_impu(mx)

@@ -654,7 +654,7 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     # print("开始执行 my_model...")
     imputed_result, mask, initial_processed = impute(X, causal_matrix,
                             model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
-                            epochs=100, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt)
+                            epochs=10, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt)
     # print("imputed_result.shape", imputed_result.shape, "gt2.shape", gt2.shape, "mask.shape", mask.shape)
     res['my_model'] = mse(imputed_result, gt2, mask)
     def is_reasonable_mse(mse_value, threshold=10000.0):
@@ -674,7 +674,7 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
         ('miracle_impu', miracle_impu), ('saits_impu', saits_impu),
         ('timemixerpp_impu', timemixerpp_impu), 
         ('tefn_impu', tefn_impu),('timesnet_impu', timesnet_impu),
-        ('tsde_impu', tsde_impu)
+        ('tsde_impu', tsde_impu),('grin_impu', grin_impu),
     ]
 
     for name, fn in baseline:
@@ -695,25 +695,39 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     print(f"所有结果: {res}")
     return res
 
-
 # ================================
 # 2. 用于 Pool 的包装函数（每个任务）
 # ================================
 def worker_wrapper(args):
+    import torch
+    import os
+
     idx, mx, causal_matrix, gpu_id = args
-    gt = mx.copy()
-    # 设置环境变量
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    
-    # 确保PyTorch使用正确的设备
+
+    print(f"[Worker PID {os.getpid()}] 分配到 GPU: {gpu_id}")
+
+    # ❌ 不再设置 CUDA_VISIBLE_DEVICES，避免限制可见卡
+    # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id) ← 注释掉
+
+    # ✅ 正确绑定 PyTorch 的 CUDA 设备
     if torch.cuda.is_available():
-        torch.cuda.set_device(0)  # 在子进程中，GPU 0就是分配给的GPU
-        device = torch.device('cuda:0')
+        torch.cuda.set_device(gpu_id)
+        device = torch.device(f'cuda:{gpu_id}')
+        print(f"[Worker PID {os.getpid()}] 实际使用 device: {device}")
     else:
         device = torch.device('cpu')
-    
-    # 传递正确的设备
-    res = mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=device)  # ← 这里改为0
+        print(f"[Worker PID {os.getpid()}] 警告：未检测到 GPU，使用 CPU")
+
+    # ✅ 显示当前 GPU 显存使用情况
+    try:
+        import subprocess
+        gpu_status = subprocess.check_output(["nvidia-smi", "--id=" + str(gpu_id), "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"])
+        print(f"[GPU {gpu_id}] 状态: {gpu_status.decode().strip()}")
+    except Exception as e:
+        print(f"[Worker PID {os.getpid()}] 获取 GPU 状态失败: {e}")
+
+    # ⚠️ 确保传递的 device 被下游使用
+    res = mse_evaluate_single_file(mx, causal_matrix, gpu_id=gpu_id, device=device)
     return idx, res
 
 # ================================
