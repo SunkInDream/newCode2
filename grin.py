@@ -422,7 +422,7 @@ def grin_impute_minimal(data_matrix, window_size=8, hidden_dim=16, epochs=5, lr=
     
     print(f"✅ 极简填补完成")
     return result
-def grin_impute_low_memory(data_matrix, window_size=15, hidden_dim=16, epochs=5, lr=0.005):
+def grin_impute_low_memory(data_matrix, window_size=15, hidden_dim=16, epochs=100, lr=0.01):
     """
     GRIN低内存版 - 减少内存占用但保持填补能力
     """

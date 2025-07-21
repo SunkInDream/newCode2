@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 import os
+from sklearn.linear_model import BayesianRidge
+from sklearn.impute import SimpleImputer
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 from sklearn.impute import KNNImputer
 # from miracle import *
@@ -90,6 +92,39 @@ def knn_impu(mx, k=5):
 
     imputer = KNNImputer(n_neighbors=k)
     return imputer.fit_transform(mx)
+
+def mice_impu(mx, max_iter=5):
+    """改进：处理全空列 + 最简版MICE填补"""
+    mx = mx.copy()
+    n_rows, n_cols = mx.shape
+
+    # === Step 0: 处理全空列 ===
+    all_nan_cols = np.all(np.isnan(mx), axis=0)
+    if all_nan_cols.any():
+        global_mean = np.nanmean(mx)
+        mx[:, all_nan_cols] = global_mean
+
+    # === Step 1: 初始均值填补 ===
+    imp = SimpleImputer(strategy='mean')
+    matrix_filled = imp.fit_transform(mx)
+
+    # === Step 2: MICE主循环 ===
+    for _ in range(max_iter): 
+        for col in range(n_cols): 
+            missing_idx = np.where(np.isnan(mx[:, col]))[0]
+            if len(missing_idx) == 0:
+                continue
+
+            observed_idx = np.where(~np.isnan(mx[:, col]))[0]
+            X_train = np.delete(matrix_filled[observed_idx], col, axis=1)
+            y_train = mx[observed_idx, col]
+            X_pred = np.delete(matrix_filled[missing_idx], col, axis=1)
+
+            model = BayesianRidge()
+            model.fit(X_train, y_train)
+            matrix_filled[missing_idx, col] = model.predict(X_pred)
+
+    return matrix_filled
 
 def ffill_impu(mx):
     mx = mx.copy()
@@ -200,7 +235,7 @@ def miracle_impu(mx):
         mx[np.isnan(mx)] = 0.0
         return mx
 
-def saits_impu(mx, epochs=10, d_model=128, n_layers=2, n_heads=4, 
+def saits_impu(mx, epochs=100, d_model=128, n_layers=2, n_heads=4, 
                d_k=32, d_v=32, d_ffn=64, dropout=0.4, device=None):
     from pypots.imputation import SAITS
     global_mean = np.nanmean(mx)
@@ -208,7 +243,6 @@ def saits_impu(mx, epochs=10, d_model=128, n_layers=2, n_heads=4,
     if all_nan_cols.any():
         print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用填充")
         mx[:, all_nan_cols] = global_mean
-    # print("_____________2______________________")
     mx = mx.copy()
     n_steps, n_features = mx.shape
     data_3d = mx[np.newaxis, :, :]  # shape: (1, n_steps, n_features)
@@ -295,11 +329,10 @@ def timemixerpp_impu(mx):
 
 
 
-def tefn_impu(mx, epoch=10, device=None):
+def tefn_impu(mx, epoch=100, device=None):
     from pypots.imputation import TEFN
     from pypots.optim.adam import Adam
     from pypots.nn.modules.loss import MAE, MSE
-    print("_____________4______________________")
     global_mean = np.nanmean(mx)
     all_nan_cols = np.all(np.isnan(mx), axis=0)
     if all_nan_cols.any():
@@ -401,7 +434,7 @@ def timesnet_impu(mx):
         n_kernels=2,
         dropout=0.1,
         batch_size=1,
-        epochs=5,
+        epochs=100,
         patience=5,
         device="cuda" if torch.cuda.is_available() else "cpu",
         verbose=False,
@@ -422,7 +455,7 @@ def timesnet_impu(mx):
     imputed = model.predict({"X": mx_filled[None, ...], "missing_mask": mask[None, ...]})
     return imputed["imputation"][0]  # 返回填补后的 (T, N) 矩阵
 
-def tsde_impu(mx, n_samples: int = 20, device: str = "cuda" if torch.cuda.is_available() else "cpu") -> np.ndarray:
+def tsde_impu(mx, n_samples: int = 40, device: str = "cuda" if torch.cuda.is_available() else "cpu") -> np.ndarray:
     from tsde import impute_missing_data
     mx = mx.copy()
     mx = impute_missing_data(
@@ -452,17 +485,17 @@ def grin_impu(mx):
         if total_size > 50000:  # 大数据集
             window_size = min(10, seq_len // 10)
             hidden_dim = min(8, max(4, n_features // 10))
-            epochs = 3
+            epochs = 80
             print(f"🔧 大数据集模式: window={window_size}, hidden={hidden_dim}")
         elif total_size > 10000:  # 中等数据集
             window_size = min(15, seq_len // 8) 
             hidden_dim = min(16, max(8, n_features // 8))
-            epochs = 5
+            epochs = 100
             print(f"🔧 中等数据集模式: window={window_size}, hidden={hidden_dim}")
         else:  # 小数据集
             window_size = min(20, seq_len // 4)
             hidden_dim = min(32, max(16, n_features // 4))
-            epochs = 10
+            epochs = 120
             print(f"🔧 小数据集模式: window={window_size}, hidden={hidden_dim}")
         
         # 调用低内存版GRIN
@@ -472,7 +505,7 @@ def grin_impu(mx):
             window_size=window_size,
             hidden_dim=hidden_dim,
             epochs=epochs,
-            lr=0.005
+            lr=0.01
         )
         
         # 验证填补结果

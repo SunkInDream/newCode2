@@ -82,7 +82,7 @@ def simulate_lorenz_96(p, T, F=10.0, delta_t=0.1, sd=0.1, burn_in=1000,
     return X_scaled, GC
 def generate_multiple_lorenz_datasets(num_datasets, p, T, seed_start=0):
     datasets = []
-    for i in range(num_datasets):
+    for i in tqdm(range(num_datasets), desc="模拟 Lorenz-96 数据集"):
         X, GC = simulate_lorenz_96(p=p, T=T, seed=seed_start+i)
         datasets.append((X, GC))
     return datasets
@@ -387,17 +387,17 @@ def generate_fama_french_datasets_with_shared_graph(
 # copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")
 # generate_sparse_matrix(50, 50, 3)
-extract_balanced_samples(
-    source_dir = "./data/III",
-    label_file = "./AAAI_3_4_labels.csv",
-    id_name = "ICUSTAY_ID",
-    label_name = "DIEINHOSPITAL",
-    target_dir = "./data/mimic-iii",
-    num_pos = 300,
-    num_neg = 300,
-    random_state = 33
-)
-# generate_and_save_lorenz_datasets(num_datasets=1, p=100, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
+# extract_balanced_samples(
+#     source_dir = "./data/III",
+#     label_file = "./AAAI_3_4_labels.csv",
+#     id_name = "ICUSTAY_ID",
+#     label_name = "DIEINHOSPITAL",
+#     target_dir = "./data/mimic-iii",
+#     num_pos = 300,
+#     num_neg = 300,
+#     random_state = 33
+# )
+generate_and_save_lorenz_datasets(num_datasets=100, p=50, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
 # datasets = generate_var_datasets_with_fixed_structure(
 #         num_datasets=12,
 #         p=100,

@@ -617,11 +617,12 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     gt2 = gt.copy()
     pd.DataFrame(gt).to_csv("1.csv", index=False)
     # 随机 mask 生成缺失
-    X = mar_logistic(mx, obs_rate=0.2, missing_rate=0.5)
-    # X = X[np.newaxis, ...]  # 增加一个维度
-    # X = mnar_x(X, offset=0.05)
-    # X = mcar(X, p=0.05)
-    # X = X.squeeze(0)  # 去掉多余的维度
+    # X = mar_logistic(mx, obs_rate=0.2, missing_rate=0.5)
+    X = mx.copy()
+    X = X[np.newaxis, ...]  # 增加一个维度
+    # X = mnar_x(X, offset=0.6)
+    X = mcar(X, p=0.5)
+    X = X.squeeze(0)  # 去掉多余的维度
     Mask = (~np.isnan(X)).astype(int)
     pd.DataFrame(X).to_csv("2.csv", index=False)
     # # mask: 观测为 1，缺失为 0
@@ -651,12 +652,12 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     res = {}
 
     # 我的模型评估
-    # print("开始执行 my_model...")
-    imputed_result, mask, initial_processed = impute(X, causal_matrix,
-                            model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
-                            epochs=10, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt)
+    print("开始执行 my_model...")
+    # imputed_result, mask, initial_processed = impute(X, causal_matrix,
+    #                         model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
+    #                         epochs=100, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt)
     # print("imputed_result.shape", imputed_result.shape, "gt2.shape", gt2.shape, "mask.shape", mask.shape)
-    res['my_model'] = mse(imputed_result, gt2, mask)
+    # res['my_model'] = mse(imputed_result, gt2, mask)
     def is_reasonable_mse(mse_value, threshold=10000.0):
         return (not np.isnan(mse_value) and 
                 not np.isinf(mse_value) and 
@@ -664,17 +665,21 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
 
     # baseline 方法
     baseline = [
-        ('initial_process', initial_process),
-        ('zero_impu', zero_impu),
-        ('mean_impu', mean_impu),
-        ('median_impu', median_impu),
-        ('mode_impu', mode_impu),
-        ('random_impu', random_impu), ('knn_impu', knn_impu),
-        ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
-        ('miracle_impu', miracle_impu), ('saits_impu', saits_impu),
-        ('timemixerpp_impu', timemixerpp_impu), 
-        ('tefn_impu', tefn_impu),('timesnet_impu', timesnet_impu),
-        ('tsde_impu', tsde_impu),('grin_impu', grin_impu),
+        # ('initial_process', initial_process),
+        # ('zero_impu', zero_impu),
+        # ('mean_impu', mean_impu),
+        # ('median_impu', median_impu),
+        # ('mode_impu', mode_impu),
+        # ('random_impu', random_impu), ('knn_impu', knn_impu),
+        # ('mice_impu', mice_impu),
+        # ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
+        # ('miracle_impu', miracle_impu), 
+        # ('saits_impu', saits_impu),
+        # ('timemixerpp_impu', timemixerpp_impu), 
+        # ('tefn_impu', tefn_impu),
+        # ('timesnet_impu', timesnet_impu),
+        ('tsde_impu', tsde_impu),
+        ('grin_impu', grin_impu),
     ]
 
     for name, fn in baseline:

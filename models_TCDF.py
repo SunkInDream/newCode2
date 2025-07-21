@@ -197,7 +197,7 @@ def compute_causal_matrix_worker(task_queue, result_queue):
         idx, data, params, real_gpu_id = item
 
         # 限制当前进程只可见一个 GPU
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(real_gpu_id)
+        # os.environ["CUDA_VISIBLE_DEVICES"] = str(real_gpu_id)
 
         # 初始化 TF 以避免干扰（如有使用）
         import tensorflow as tf
@@ -208,7 +208,7 @@ def compute_causal_matrix_worker(task_queue, result_queue):
 
         # 在当前进程中，唯一可见的 GPU 是 CUDA_VISIBLE_DEVICES=real_gpu_id
         # 所以 PyTorch 中直接使用 cuda:0 即可
-        matrix = compute_causal_matrix(data, params, gpu_id=0)
+        matrix = compute_causal_matrix(data, params, gpu_id=real_gpu_id)
         result_queue.put((idx, matrix))
 
 def parallel_compute_causal_matrices(data_list, params_list):
