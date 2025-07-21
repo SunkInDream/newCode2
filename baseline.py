@@ -395,7 +395,7 @@ def timesnet_impu(mx):
         n_steps=n_steps,
         n_features=n_features,
         n_layers=2,
-        top_k=2,
+        top_k=8,
         d_model=4,
         d_ffn=8,
         n_kernels=2,

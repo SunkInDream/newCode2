@@ -617,11 +617,11 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     gt2 = gt.copy()
     pd.DataFrame(gt).to_csv("1.csv", index=False)
     # 随机 mask 生成缺失
-    X = mar_logistic(mx, obs_rate=0.2, missing_rate=0.1)
-    X = X[np.newaxis, ...]  # 增加一个维度
-    X = mnar_x(X, offset=0.05)
-    X = mcar(X, p=0.05)
-    X = X.squeeze(0)  # 去掉多余的维度
+    X = mar_logistic(mx, obs_rate=0.2, missing_rate=0.5)
+    # X = X[np.newaxis, ...]  # 增加一个维度
+    # X = mnar_x(X, offset=0.05)
+    # X = mcar(X, p=0.05)
+    # X = X.squeeze(0)  # 去掉多余的维度
     Mask = (~np.isnan(X)).astype(int)
     pd.DataFrame(X).to_csv("2.csv", index=False)
     # # mask: 观测为 1，缺失为 0
