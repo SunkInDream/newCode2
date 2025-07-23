@@ -119,11 +119,15 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
     initial_filled = SecondProcess(first)
     initial_filled_copy = initial_filled.copy()
     
-    # 使用float32确保兼容性
-    x = torch.tensor(initial_filled[None, ...], dtype=torch.float32, device=device)
-    y = torch.tensor(initial_filled[None, ...], dtype=torch.float32, device=device)
-    m = torch.tensor(mask[None, ...], dtype=torch.float32, device=device)
+    # ✅ 添加标准化
+    scaler = StandardScaler()
+    initial_filled_scaled = scaler.fit_transform(initial_filled)
     
+    # 使用标准化后的数据创建张量
+    x = torch.tensor(initial_filled_scaled[None, ...], dtype=torch.float32, device=device)
+    y = torch.tensor(initial_filled_scaled[None, ...], dtype=torch.float32, device=device)
+    m = torch.tensor(mask[None, ...], dtype=torch.float32, device=device)
+
     # 创建模型
     print("causal_matrix.shape", causal_matrix.shape)
     model = ParallelFeatureADDSTCN(
@@ -140,7 +144,7 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
 
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=lr*0.01)
-    scaler = torch.cuda.amp.GradScaler() if device.type == 'cuda' and torch.cuda.is_available() else None
+    grad_scaler = torch.cuda.amp.GradScaler() if device.type == 'cuda' and torch.cuda.is_available() else None  # ✅ 改名
 
     # 早停机制
     best_loss = float('inf')
@@ -152,12 +156,12 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
     y_mean = y.mean(dim=1, keepdim=True)
     y_std = y.std(dim=1, keepdim=True)
     quantiles = [0.25, 0.5, 0.75]
-    y_quantiles = [torch.quantile(y.float(), q, dim=1, keepdim=True) for q in quantiles]  # ✅ 确保float32
+    y_quantiles = [torch.quantile(y.float(), q, dim=1, keepdim=True) for q in quantiles]
 
     for epoch in range(epochs):
         opt.zero_grad()
         
-        if scaler:
+        if grad_scaler:  # ✅ 使用 grad_scaler
             with torch.cuda.amp.autocast():
                 pred = model(x)
                 
@@ -182,11 +186,11 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
                 loss_3 = (mean_loss + std_loss + sum(quantile_losses)) / (2 + len(quantiles))
                 total_loss = 0.6 * loss_1 + 0.4 * loss_3
             
-            scaler.scale(total_loss).backward()
-            scaler.unscale_(opt)
+            grad_scaler.scale(total_loss).backward()  # ✅ 使用 grad_scaler
+            grad_scaler.unscale_(opt)                 # ✅ 使用 grad_scaler
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(opt)
-            scaler.update()
+            grad_scaler.step(opt)                     # ✅ 使用 grad_scaler
+            grad_scaler.update()                      # ✅ 使用 grad_scaler
         else:
             # 普通训练
             pred = model(x)
@@ -236,10 +240,11 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
 
-    # 用最优结果进行填补
+    # 用最优结果进行填补并反标准化
     res = initial_filled.copy()
     if best_imputed is not None:
-        res[mask == 0] = best_imputed[mask == 0]
+        best_imputed_rescaled = scaler.inverse_transform(best_imputed)  # ✅ 反标准化
+        res[mask == 0] = best_imputed_rescaled[mask == 0]
     
     pd.DataFrame(res).to_csv("result_1.csv", index=False)
     torch.cuda.empty_cache()
@@ -653,12 +658,12 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
         print(f"⚠️ mar_logistic失败，跳过此文件: {e}")
         return None  # 直接返回None表示跳过
     
-    # X = mx.copy()
-    # X = X[np.newaxis, ...]  # 增加一个维度
-    # # X = mnar_x(X, offset=0.6)
-    # X = mcar(X, p=0.5)
-    # X = X.squeeze(0)  # 去掉多余的维度
-    pre_checkee(X)
+    X = mx.copy()
+    X = X[np.newaxis, ...]  # 增加一个维度
+    X = mnar_x(X, offset=0.6)
+    X = mcar(X, p=0.5)
+    X = X.squeeze(0)  # 去掉多余的维度
+    # pre_checkee(X)
     pd.DataFrame(X).to_csv("2.csv", index=False)
     # # mask: 观测为 1，缺失为 0
     # M = (~np.isnan(X)).astype(int)
@@ -806,7 +811,7 @@ def parallel_mse_evaluate(res_list, causal_matrix, simultaneous_per_gpu=3):
         results = list(tqdm(pool.imap(worker_wrapper, args_list), total=len(args_list), desc="All‑tasks"))
 
     results.sort(key=lambda x: x[0])  # 恢复顺序
-    only_result_dicts = [res for _, res in results]
+    only_result_dicts = [res for _, res in results if res is not None]
 
     avg = {}
     for k in only_result_dicts[0]:

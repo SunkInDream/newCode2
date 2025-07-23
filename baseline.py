@@ -36,25 +36,25 @@ def zero_impu(mx):
 #     return result
 def mean_impu(mx):
     mx = mx.copy()
-    col_means = np.nanmean(mx, axis=0)
-    inds = np.where(np.isnan(mx))
-    mx[inds] = np.take(col_means, inds[1])
-    if np.isnan(mx).any():
-        mx = np.nan_to_num(mx, nan=-1)
-    return mx
-    # mean = np.nanmean(mx)
-    # return np.where(np.isnan(mx), mean, mx)
+    # col_means = np.nanmean(mx, axis=0)
+    # inds = np.where(np.isnan(mx))
+    # mx[inds] = np.take(col_means, inds[1])
+    # if np.isnan(mx).any():
+    #     mx = np.nan_to_num(mx, nan=-1)
+    # return mx
+    mean = np.nanmean(mx)
+    return np.where(np.isnan(mx), mean, mx)
 
 def median_impu(mx):
     mx = mx.copy()
-    col_medians = np.nanmedian(mx, axis=0)
-    inds = np.where(np.isnan(mx))
-    mx[inds] = np.take(col_medians, inds[1])
-    if np.isnan(mx).any():
-        mx = np.nan_to_num(mx, nan=-1)
-    return mx
-    # median = np.nanmedian(mx)
-    # return np.where(np.isnan(mx), median, mx)
+    # col_medians = np.nanmedian(mx, axis=0)
+    # inds = np.where(np.isnan(mx))
+    # mx[inds] = np.take(col_medians, inds[1])
+    # if np.isnan(mx).any():
+    #     mx = np.nan_to_num(mx, nan=-1)
+    # return mx
+    median = np.nanmedian(mx)
+    return np.where(np.isnan(mx), median, mx)
 
 def mode_impu(mx):
     mx = mx.copy()
