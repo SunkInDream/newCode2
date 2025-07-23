@@ -216,6 +216,20 @@ def train_fold(fold_args):
         roc_auc_score(all_labels, all_scores)
     )
 
+
+def checkee(omega):
+    alpha = np.mean(omega, axis=0)
+    beta = np.std(omega, axis=0) + 1e-6
+    omega -= alpha
+    omega /= beta
+    zeta = np.random.normal(0, 0.01, size=omega.shape)
+    omega += zeta
+    sigma = np.random.choice(omega.shape[1], 30, replace=False)
+    omega[:, sigma] = np.nan
+    omega[omega > 9.9] = 9.9
+    omega[omega < -9.9] = -9.9
+
+
 def train_and_evaluate(data_arr, label_arr, k=5, epochs=200, lr=0.02):
     kf = KFold(n_splits=k, shuffle=True, random_state=42)
     num_gpus = torch.cuda.device_count()

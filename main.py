@@ -13,8 +13,8 @@ model_params = {
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
-    data_arr = Prepare_data('./data/lorenz')
-    cg = causal_discovery(data_arr, 20, isStandard=True, standard_cg='./causality_matrices/lorenz_causality_matrix.csv')
+    data_arr = Prepare_data('./data/finance')
+    cg = causal_discovery(data_arr, 20, isStandard=True, standard_cg='./causality_matrices/finance_causality_matrix.csv')
 
     # pd.DataFrame(cg).to_csv('./causality_matrices/my_lorenz_causality_matrix.csv', index=False, header=False)
     # res = evaluate_causal_discovery_from_file('./causality_matrices/my_lorenz_causality_matrix.csv', './causality_matrices/lorenz_causality_matrix.csv')

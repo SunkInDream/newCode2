@@ -15,7 +15,7 @@ def apply_basic_imputation_methods(df):
     # 基础填充方法
     basic_methods = {
         # 'zero': zero_impu,
-        # 'mean': mean_impu,
+        'mean': mean_impu,
         # 'median': median_impu,
         # 'mode': mode_impu,
         # 'random': random_impu,
@@ -68,9 +68,9 @@ def apply_advanced_imputation_methods(df):
     advanced_methods = {
         # 'miracle': miracle_impu,
         # 'saits': saits_impu,
-        # 'timemixerpp': timemixerpp_impu,
+        'timemixerpp': timemixerpp_impu,
         # 'tefn': tefn_impu,
-        # 'timesnet': timesnet_impu,
+        'timesnet': timesnet_impu,
         'tsde': tsde_impu,
         'grin': grin_impu,
     }

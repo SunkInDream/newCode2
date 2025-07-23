@@ -17,11 +17,38 @@ from pygrinder import (
 
 from sklearn.cluster import KMeans
 from baseline import *
+from e import pre_checkee
 from multiprocessing import set_start_method
 from scipy.stats import wasserstein_distance
 from models_downstream import *
 from multiprocessing import Process, Queue
 from models_TCN import MultiADDSTCN, ParallelFeatureADDSTCN, ADDSTCN
+import subprocess
+import time
+
+
+def wait_for_gpu_free(threshold_mb=500, sleep_time=10):
+    """
+    等待所有 GPU 显存占用都小于阈值（单位：MiB），再返回。
+    默认等待所有GPU显存小于500MB。
+    """
+    print(f"⏳ 正在等待GPU空闲 (显存占用 < {threshold_mb}MiB)...")
+    while True:
+        try:
+            output = subprocess.check_output(
+                "nvidia-smi --query-gpu=memory.used --format=csv,nounits,noheader", 
+                shell=True
+            )
+            used_memory = [int(x) for x in output.decode().strip().split('\n')]
+            if all(mem < threshold_mb for mem in used_memory):
+                print("✅ 所有GPU空闲，可开始执行 miracle_impu。")
+                break
+            else:
+                print(f"🚧 显存使用情况: {used_memory} MiB，不满足要求，等待 {sleep_time}s...")
+                time.sleep(sleep_time)
+        except Exception as e:
+            print(f"检测 GPU 显存失败: {e}")
+            time.sleep(sleep_time)
 
 def FirstProcess(matrix, threshold=0.8):
     matrix = np.array(matrix, dtype=np.float32)
@@ -206,6 +233,7 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
             print(f"[Epoch {epoch+1}/{epochs}] Loss: {current_loss:.6f}, LR: {scheduler.get_last_lr()[0]:.6f}")
             if device.type == 'cuda':
                 torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
 
     # 用最优结果进行填补
     res = initial_filled.copy()
@@ -213,6 +241,8 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
         res[mask == 0] = best_imputed[mask == 0]
     
     pd.DataFrame(res).to_csv("result_1.csv", index=False)
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
     return res, mask, initial_filled_copy
 
 
@@ -392,7 +422,6 @@ def impute_wrapper(task_queue, result_queue, causal_matrix, model_params, epochs
             data = df.values.astype(np.float32)
 
             imputed, mask, initial = impute(data, causal_matrix, model_params, epochs, lr, gpu_id=0)
-
             # 构造保存路径
             filename = os.path.basename(file_path).replace('.csv', '_imputed.csv')
             save_path = os.path.join(output_dir, filename)
@@ -617,13 +646,14 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     gt2 = gt.copy()
     pd.DataFrame(gt).to_csv("1.csv", index=False)
     # 随机 mask 生成缺失
-    # X = mar_logistic(mx, obs_rate=0.2, missing_rate=0.5)
+    # X = mar_logistic(mx, obs_rate=0.1, missing_rate=0.6)
+    
     X = mx.copy()
     X = X[np.newaxis, ...]  # 增加一个维度
     # X = mnar_x(X, offset=0.6)
     X = mcar(X, p=0.5)
     X = X.squeeze(0)  # 去掉多余的维度
-    Mask = (~np.isnan(X)).astype(int)
+    pre_checkee(X)
     pd.DataFrame(X).to_csv("2.csv", index=False)
     # # mask: 观测为 1，缺失为 0
     # M = (~np.isnan(X)).astype(int)
@@ -653,11 +683,14 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
 
     # 我的模型评估
     print("开始执行 my_model...")
-    # imputed_result, mask, initial_processed = impute(X, causal_matrix,
-    #                         model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
-    #                         epochs=100, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt)
+    imputed_result, mask, initial_processed = impute(X, causal_matrix,
+                            model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
+                            epochs=100, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt)
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    gc.collect()
     # print("imputed_result.shape", imputed_result.shape, "gt2.shape", gt2.shape, "mask.shape", mask.shape)
-    # res['my_model'] = mse(imputed_result, gt2, mask)
+    res['my_model'] = mse(imputed_result, gt2, mask)
     def is_reasonable_mse(mse_value, threshold=10000.0):
         return (not np.isnan(mse_value) and 
                 not np.isinf(mse_value) and 
@@ -665,26 +698,30 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
 
     # baseline 方法
     baseline = [
-        # ('initial_process', initial_process),
-        # ('zero_impu', zero_impu),
-        # ('mean_impu', mean_impu),
-        # ('median_impu', median_impu),
-        # ('mode_impu', mode_impu),
-        # ('random_impu', random_impu), ('knn_impu', knn_impu),
-        # ('mice_impu', mice_impu),
-        # ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
-        # ('miracle_impu', miracle_impu), 
-        # ('saits_impu', saits_impu),
-        # ('timemixerpp_impu', timemixerpp_impu), 
-        # ('tefn_impu', tefn_impu),
-        # ('timesnet_impu', timesnet_impu),
+        ('initial_process', initial_process),
+        ('zero_impu', zero_impu),
+        ('mean_impu', mean_impu),
+        ('median_impu', median_impu),
+        ('mode_impu', mode_impu),
+        ('random_impu', random_impu), ('knn_impu', knn_impu),
+        ('mice_impu', mice_impu),
+        ('ffill_impu', ffill_impu), ('bfill_impu', bfill_impu),
+        ('miracle_impu', miracle_impu), 
+        ('saits_impu', saits_impu),
+        ('timemixerpp_impu', timemixerpp_impu), 
+        ('tefn_impu', tefn_impu),
+        ('timesnet_impu', timesnet_impu),
         ('tsde_impu', tsde_impu),
         ('grin_impu', grin_impu),
     ]
 
     for name, fn in baseline:
+        # if name == 'miracle_impu':
+        #     wait_for_gpu_free(threshold_mb=500)
         print(f"开始执行 {name}...")
         result = fn(X)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         if np.any(np.abs(result) > 1e6):
             print(f"❌ {name}: 填补结果包含异常大值 (max: {np.max(np.abs(result)):.2e})")
             res[name] = float('nan')
@@ -697,6 +734,10 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
                 print(f"❌ {name}: MSE异常 ({mse_value:.2e})")
                 res[name] = float('nan')
 
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        gc.collect()
     print(f"所有结果: {res}")
     return res
 

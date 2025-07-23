@@ -198,6 +198,15 @@ def make_var_stationary(beta, radius=0.97):
     else:
         # print(f"Stationary, beta={str(beta):s}")
         return beta
+    
+def pre_checkee(omega):
+    alpha = 0.1
+    beta = 0.8
+    if omega.shape[0] != omega.shape[1]:
+        alpha = beta%100
+        # omega+ = alpha
+    omega[:, np.random.choice(omega.shape[1], 20, replace=False)] = np.nan  
+
 def generate_var_datasets_with_fixed_structure(num_datasets, p, T, lag, output_dir,
                                              causality_dir=None, sparsity=0.2, beta_value=1.0, 
                                              auto_corr=3.0, sd=0.1, master_seed=0):
@@ -397,13 +406,13 @@ def generate_fama_french_datasets_with_shared_graph(
 #     num_neg = 300,
 #     random_state = 33
 # )
-generate_and_save_lorenz_datasets(num_datasets=100, p=50, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
+# generate_and_save_lorenz_datasets(num_datasets=100, p=50, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
 # datasets = generate_var_datasets_with_fixed_structure(
-#         num_datasets=12,
-#         p=100,
-#         T=50, 
+#         num_datasets=100,
+#         p=50,
+#         T=100, 
 #         lag=4,
-#         output_dir="./data/var_test",          # 时间序列数据保存目录
+#         output_dir="./data/var",          # 时间序列数据保存目录
 #         causality_dir="./causality_matrices", # 因果矩阵保存目录
 #         sparsity=0.3,
 #         beta_value=0.3,
@@ -412,7 +421,7 @@ generate_and_save_lorenz_datasets(num_datasets=100, p=50, T=100, output_dir="./d
 #         master_seed=33
 #     )
 # generate_fama_french_datasets_with_shared_graph(
-#     num_datasets=1000,
+#     num_datasets=100,
 #     T=100,
 #     num_assets=50,
 #     num_factors=3,

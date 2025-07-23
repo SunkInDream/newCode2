@@ -36,14 +36,14 @@ def zero_impu(mx):
 #     return result
 def mean_impu(mx):
     mx = mx.copy()
-    # col_means = np.nanmean(mx, axis=0)
-    # inds = np.where(np.isnan(mx))
-    # mx[inds] = np.take(col_means, inds[1])
-    # if np.isnan(mx).any():
-    #     mx = np.nan_to_num(mx, nan=-1)
-    # return mx
-    mean = np.nanmean(mx)
-    return np.where(np.isnan(mx), mean, mx)
+    col_means = np.nanmean(mx, axis=0)
+    inds = np.where(np.isnan(mx))
+    mx[inds] = np.take(col_means, inds[1])
+    if np.isnan(mx).any():
+        mx = np.nan_to_num(mx, nan=-1)
+    return mx
+    # mean = np.nanmean(mx)
+    # return np.where(np.isnan(mx), mean, mx)
 
 def median_impu(mx):
     mx = mx.copy()
@@ -148,95 +148,106 @@ def bfill_impu(mx):
 
     return df.values
 
-def miracle_impu(mx):
+def miracle_impu(mx: np.ndarray) -> np.ndarray:
+    from miracle import MIRACLE
+    mx = mx.copy().astype(np.float32)
+    global_mean = np.nanmean(mx)
+    if np.isnan(global_mean):
+        global_mean = 0.0
+    all_nan_cols = np.all(np.isnan(mx), axis=0)
+    if all_nan_cols.any():
+        mx[:, all_nan_cols] = global_mean
+
+    n_feats = mx.shape[1]
+    missing_idx = np.where(np.any(np.isnan(mx), axis=0))[0][:20]
+
+    model = MIRACLE(
+        num_inputs=n_feats,
+        missing_list=missing_idx.tolist(),
+        n_hidden=min(32, max(8, n_feats // 2)),
+        lr=0.008,
+        max_steps=50,
+        window=5,
+        seed=42
+    )
+
+    result = model.fit(mx)
+
+    del model
+    gc.collect()
+    return result.astype(np.float32)
+
+
+# ✅ 同时优化其他方法，提高整体baseline质量
+def saits_impu(mx, epochs=None, d_model=None, n_layers=None, device=None):
+    """动态参数的SAITS填补"""
+    from pypots.imputation import SAITS
+    
+    mx = mx.copy()
+    seq_len, n_features = mx.shape
+    total_size = seq_len * n_features
+    
+    # 处理全空列
+    global_mean = np.nanmean(mx)
+    if np.isnan(global_mean):
+        global_mean = 0.0
+    
+    all_nan_cols = np.all(np.isnan(mx), axis=0)
+    if all_nan_cols.any():
+        mx[:, all_nan_cols] = global_mean
+    
+    # ✅ 根据数据大小动态调整参数
+    if epochs is None:
+        if total_size > 50000:
+            epochs = 20
+            d_model = 64
+            n_layers = 1
+        elif total_size > 10000:
+            epochs = 50
+            d_model = 128
+            n_layers = 2
+        else:
+            epochs = 100
+            d_model = 128
+            n_layers = 2
+    
+    if d_model is None:
+        d_model = min(128, max(32, n_features * 4))
+    
+    if n_layers is None:
+        n_layers = 2 if total_size < 20000 else 1
+    
     try:
-        global_mean = np.nanmean(mx)
-        from miracle import MIRACLE
-        mx = mx.copy()
+        data_3d = mx[np.newaxis, :, :]
         
-        # 检查是否有缺失值
-        if not np.isnan(mx).any():
-            print("数据中没有缺失值，直接返回原数据")
-            return mx
-        
-        # 检查是否所有值都是NaN
-        if np.isnan(mx).all():
-            print("所有值都是NaN，使用0填充")
-            return np.zeros_like(mx)
-        
-        # 检查是否有整列都是NaN
-        all_nan_cols = np.all(np.isnan(mx), axis=0)
-        if all_nan_cols.any():
-            print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用填充")
-            mx[:, all_nan_cols] = global_mean
-        
-        # 重新检查剩余的缺失值
-        missing_idxs = np.where(np.any(np.isnan(mx), axis=0))[0]
-        
-        # 如果没有剩余的缺失值，直接返回
-        if len(missing_idxs) == 0:
-            print("处理完全NaN列后，没有剩余缺失值")
-            return mx
-        
-        # 对剩余缺失值使用均值填充作为种子
-        mx_imputed = mean_impu(mx)
-        
-        # 使用MIRACLE进行填补
-        miracle = MIRACLE(
-            num_inputs=mx.shape[1],
-            reg_lambda=6,
-            reg_beta=4,
-            n_hidden=32,
-            ckpt_file="tmp.ckpt",
-            missing_list=missing_idxs,
-            reg_m=0.1,
-            lr=0.01,
-            window=10,
-            max_steps=200,  # 减少训练步数避免过拟合
+        saits = SAITS(
+            n_steps=seq_len,
+            n_features=n_features,
+            n_layers=n_layers,
+            d_model=d_model,
+            n_heads=min(4, d_model // 32),
+            d_k=d_model // 8,
+            d_v=d_model // 8,
+            d_ffn=d_model,
+            dropout=0.1,
+            epochs=epochs,
+            patience=10,
+            batch_size=32,
+            device=device or ('cuda' if torch.cuda.is_available() else 'cpu'),
         )
         
-        miracle_imputed_data_x = miracle.fit(
-            mx,
-            X_seed=mx_imputed,
-        )
+        train_set = {"X": data_3d}
+        saits.fit(train_set)
+        imputed_data_3d = saits.impute(train_set)
         
-        # ✅ 检查MIRACLE输出结果
-        if miracle_imputed_data_x is None:
-            print("MIRACLE返回None，使用0填充")
-            return np.zeros_like(mx)
-        
-        # 检查是否所有值都是NaN
-        if np.isnan(miracle_imputed_data_x).all():
-            print("MIRACLE输出全为NaN，使用0填充")
-            return np.zeros_like(mx)
-        
-        # 检查是否还有NaN值
-        if np.isnan(miracle_imputed_data_x).any():
-            print("MIRACLE输出包含NaN，将剩余NaN替换为0")
-            miracle_imputed_data_x = np.where(np.isnan(miracle_imputed_data_x), 0.0, miracle_imputed_data_x)
-        
-        # 检查是否有异常大值
-        if np.any(np.abs(miracle_imputed_data_x) > 1e6):
-            print(f"MIRACLE输出包含异常大值 (max: {np.max(np.abs(miracle_imputed_data_x)):.2e})，使用均值填充")
-            return mean_impu(mx)
-        
-        # 检查是否有无穷值
-        if np.any(np.isinf(miracle_imputed_data_x)):
-            print("MIRACLE输出包含无穷值，使用均值填充")
-            return mean_impu(mx)
-        
-        print("MIRACLE填补成功")
-        return miracle_imputed_data_x
+        return imputed_data_3d[0]
         
     except Exception as e:
-        print(f"MIRACLE填补失败: {e}")
-        print("使用0填充作为fallback")
-        mx = mx.copy()
-        mx[np.isnan(mx)] = 0.0
-        return mx
+        print(f"SAITS失败: {e}")
+        return mean_impu(mx)
 
-def saits_impu(mx, epochs=100, d_model=128, n_layers=2, n_heads=4, 
-               d_k=32, d_v=32, d_ffn=64, dropout=0.4, device=None):
+def saits_impu(mx, epochs=50, d_model=32, n_layers=2, n_heads=4, 
+               d_k=8, d_v=8, d_ffn=16, dropout=0.4, device=None):
     from pypots.imputation import SAITS
     global_mean = np.nanmean(mx)
     all_nan_cols = np.all(np.isnan(mx), axis=0)
@@ -268,65 +279,76 @@ def saits_impu(mx, epochs=100, d_model=128, n_layers=2, n_heads=4,
     return imputed_data_2d
 
 def timemixerpp_impu(mx):
-    """TimeMixer++ 填补函数的修复版本"""
+    import numpy as np
+    import torch
+    from pypots.imputation import TimeMixerPP
+    from sklearn.impute import SimpleImputer
+
+    # Step 1: 准备输入数据 (T, N) → (1, T, N)
+    mx = mx.astype(np.float32)
     global_mean = np.nanmean(mx)
     all_nan_cols = np.all(np.isnan(mx), axis=0)
     if all_nan_cols.any():
         print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用填充")
         mx[:, all_nan_cols] = global_mean
-    try:
-        from pypots.imputation import TimeMixerpp
-        
-        # 检查输入维度
-        if mx.shape[1] < 5:
-            print(f"TimeMixer++ 需要至少5个特征，当前只有 {mx.shape[1]}，使用均值填补")
-            return mean_impu(mx)
-        
-        # 确保输入格式正确
-        if len(mx.shape) == 2:
-            # 添加batch维度
-            train_data = mx[np.newaxis, ...]
-        else:
-            train_data = mx
-        
-        # 创建模型时指定正确的参数
-        timemixer = TimeMixerpp(
-            n_steps=mx.shape[0],
-            n_features=mx.shape[1],
-            n_layers=1,       
-            d_model=8,      
-            d_ffn=8,          
-            n_heads=1,      
-            n_kernels=1,      
-            top_k=1,          
-            dropout=0.5,      
-            channel_mixing=False,        
-            channel_independence=False,   
-            downsampling_layers=0,       
-            apply_nonstationary_norm=False, 
-            epochs=5,         
-            patience=0,       
-            batch_size=128,   
-            verbose=False,   
+    T, N = mx.shape
+    data = mx[None, ...]  # (1, T, N)
+
+    # Step 2: 构建 mask
+    missing_mask = np.isnan(data).astype(np.float32)
+    indicating_mask = (~np.isnan(data)).astype(np.float32)
+
+    # Step 3: 简单均值填补初始缺失值
+    imp = SimpleImputer(strategy='mean', keep_empty_features=True)
+    X_filled = imp.fit_transform(mx).astype(np.float32)
+    X_filled = X_filled[None, ...]
+
+    # Step 4: 构造数据字典
+    dataset = {
+        "X": X_filled,
+        "missing_mask": missing_mask,
+        "indicating_mask": indicating_mask,
+        "X_ori": data
+    }
+
+    # Step 5: 初始化模型
+    model = TimeMixerPP(
+            n_steps=T,
+            n_features=N,
+            n_layers=1,
+            d_model=64,  # ✅ 增大到64
+            d_ffn=128,   # ✅ 增大到128
+            top_k=T//2,  # ✅ 动态设置为时间步的一半
+            n_heads=2,   # ✅ 增加到2
+            n_kernels=6, # ✅ 增加到6，确保多尺度
+            dropout=0.1,
+            channel_mixing=True,   # ✅ 改为True
+            channel_independence=False,  # ✅ 改为False
+            downsampling_layers=1,    # ✅ 改为1层下采样
+            downsampling_window=2,    # ✅ 改为2
+            apply_nonstationary_norm=False,
+            batch_size=1,
+            epochs=10,
+            patience=3,
+            verbose=False,
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
 
-        
-        # 训练和填补
-        timemixer.fit(train_data)
-        imputed_data = timemixer.predict(train_data)
-        
-        # 确保输出格式正确
-        if len(imputed_data.shape) == 3:
-            return imputed_data[0]  # 移除batch维度
-        else:
-            return imputed_data
-            
-    except Exception as e:
-        print(f"TimeMixer++ 执行失败: {e}")
-        return mean_impu(mx)
+    # Step 6: 训练模型
+    model.fit(train_set=dataset)
 
+    # Step 7: 使用标准预测方法
+    result = model.predict(dataset)
+    if isinstance(result, dict):
+        imputed = result.get('imputation', list(result.values())[0])
+    else:
+        imputed = result
 
+    # 移除batch维度
+    if len(imputed.shape) == 3:
+        imputed = imputed[0]  # (T, N)
+
+    return imputed
 
 
 def tefn_impu(mx, epoch=100, device=None):
@@ -428,13 +450,13 @@ def timesnet_impu(mx):
         n_steps=n_steps,
         n_features=n_features,
         n_layers=2,
-        top_k=8,
-        d_model=4,
-        d_ffn=8,
+        top_k=1,
+        d_model=2,
+        d_ffn=2,
         n_kernels=2,
         dropout=0.1,
         batch_size=1,
-        epochs=100,
+        epochs=5,
         patience=5,
         device="cuda" if torch.cuda.is_available() else "cpu",
         verbose=False,
