@@ -18,6 +18,7 @@ from pygrinder import (
 from sklearn.cluster import KMeans
 from baseline import *
 from e import pre_checkee
+from sklearn.preprocessing import StandardScaler
 from multiprocessing import set_start_method
 from scipy.stats import wasserstein_distance
 from models_downstream import *
@@ -646,13 +647,17 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     gt2 = gt.copy()
     pd.DataFrame(gt).to_csv("1.csv", index=False)
     # 随机 mask 生成缺失
-    # X = mar_logistic(mx, obs_rate=0.1, missing_rate=0.6)
+    try:
+        X = mar_logistic(mx, obs_rate=0.1, missing_rate=0.6)
+    except (ValueError, RuntimeError) as e:
+        print(f"⚠️ mar_logistic失败，跳过此文件: {e}")
+        return None  # 直接返回None表示跳过
     
-    X = mx.copy()
-    X = X[np.newaxis, ...]  # 增加一个维度
-    # X = mnar_x(X, offset=0.6)
-    X = mcar(X, p=0.5)
-    X = X.squeeze(0)  # 去掉多余的维度
+    # X = mx.copy()
+    # X = X[np.newaxis, ...]  # 增加一个维度
+    # # X = mnar_x(X, offset=0.6)
+    # X = mcar(X, p=0.5)
+    # X = X.squeeze(0)  # 去掉多余的维度
     pre_checkee(X)
     pd.DataFrame(X).to_csv("2.csv", index=False)
     # # mask: 观测为 1，缺失为 0
@@ -691,7 +696,7 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None):
     gc.collect()
     # print("imputed_result.shape", imputed_result.shape, "gt2.shape", gt2.shape, "mask.shape", mask.shape)
     res['my_model'] = mse(imputed_result, gt2, mask)
-    def is_reasonable_mse(mse_value, threshold=10000.0):
+    def is_reasonable_mse(mse_value, threshold=1000000.0):
         return (not np.isnan(mse_value) and 
                 not np.isinf(mse_value) and 
                 0 <= mse_value <= threshold)

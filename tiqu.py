@@ -14,14 +14,14 @@ def apply_basic_imputation_methods(df):
     
     # 基础填充方法
     basic_methods = {
-        # 'zero': zero_impu,
+        'zero': zero_impu,
         'mean': mean_impu,
-        # 'median': median_impu,
-        # 'mode': mode_impu,
-        # 'random': random_impu,
-        # 'knn': knn_impu,
-        # 'ffill': ffill_impu,
-        # 'bfill': bfill_impu,
+        'median': median_impu,
+        'mode': mode_impu,
+        'random': random_impu,
+        'knn': knn_impu,
+        'ffill': ffill_impu,
+        'bfill': bfill_impu,
         'mice': mice_impu,
     }
     
@@ -66,10 +66,10 @@ def apply_advanced_imputation_methods(df):
     
     # 高级填充方法
     advanced_methods = {
-        # 'miracle': miracle_impu,
-        # 'saits': saits_impu,
+        'miracle': miracle_impu,
+        'saits': saits_impu,
         'timemixerpp': timemixerpp_impu,
-        # 'tefn': tefn_impu,
+        'tefn': tefn_impu,
         'timesnet': timesnet_impu,
         'tsde': tsde_impu,
         'grin': grin_impu,
@@ -257,7 +257,7 @@ if __name__ == "__main__":
     import sys
     
     # 默认参数
-    default_file = "/data/zhangxian/newCode2/data/III/200001.csv"
+    default_file = "./2013-03-07_dig_missing.csv"
     default_output = "./"
     
     # 从命令行获取参数

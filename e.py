@@ -205,7 +205,7 @@ def pre_checkee(omega):
     if omega.shape[0] != omega.shape[1]:
         alpha = beta%100
         # omega+ = alpha
-    omega[:, np.random.choice(omega.shape[1], 20, replace=False)] = np.nan  
+    omega[:, np.random.choice(omega.shape[1], 2, replace=False)] = np.nan  
 
 def generate_var_datasets_with_fixed_structure(num_datasets, p, T, lag, output_dir,
                                              causality_dir=None, sparsity=0.2, beta_value=1.0, 
