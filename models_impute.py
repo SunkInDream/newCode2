@@ -26,7 +26,8 @@ from multiprocessing import Process, Queue
 from models_TCN import MultiADDSTCN, ParallelFeatureADDSTCN, ADDSTCN
 import subprocess
 import time
-
+from multiprocessing import Pool, get_context
+from functools import partial
 
 def wait_for_gpu_free(threshold_mb=500, sleep_time=10):
     """
@@ -252,303 +253,77 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
     return res, mask, initial_filled_copy
 
 
-# def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None, ifGt=False, gt=None):
-#     device = torch.device(f'cuda:{gpu_id}' if gpu_id is not None and torch.cuda.is_available() else 'cpu')
 
-#     first = FirstProcess(original.copy())
-#     mask = (~np.isnan(first)).astype(int)
-#     filled = SecondProcess(first)
+def impute_wrapper(args):
+        import torch
+        import os
 
-#     # 构造张量
-#     x = torch.tensor(filled.T[None, ...], dtype=torch.float32, device=device)
-#     y = torch.tensor(filled[None, ...], dtype=torch.float32, device=device).transpose(1, 2)
-#     m = torch.tensor(mask[None, ...], dtype=torch.float32, device=device).transpose(1, 2)
+        idx, mx, file_path, causal_matrix, gpu_id, output_dir, model_params, epochs, lr = args
 
-#     model = MultiADDSTCN(
-#         causal_mask=causal_matrix,
-#         cuda=device.type == 'cuda',
-#         **model_params
-#     ).to(device)
-
-#     opt = torch.optim.Adam(model.parameters(), lr=lr)
-#     best_loss = float('inf')
-#     best_imputed = None
-
-#     for epoch in range(epochs):
-#         opt.zero_grad()
-#         pred = model(x)  # (1, T, N)
-
-#         # Loss1: 观测值的预测误差
-#         loss_1 = F.mse_loss(pred * m, y * m)
-
-#         # Loss2: 针对缺失位置与gt的一致性（与评估函数保持一致）
-#         if ifGt and gt is not None:
-#             mask_np = (~np.isnan(original)).astype(int)
-#             missing_mask_np = (1 - mask_np).astype(bool)
-
-#             pred_np = pred.detach().cpu().squeeze(0).numpy()
-#             gt_np = gt.copy()
-
-#             pred_missing = pred_np[missing_mask_np]
-#             gt_missing = gt_np[missing_mask_np]
-
-#             pred_tensor = torch.tensor(pred_missing, dtype=torch.float32, device=device, requires_grad=True)
-#             gt_tensor = torch.tensor(gt_missing, dtype=torch.float32, device=device)
-
-#             loss_2 = F.mse_loss(pred_tensor, gt_tensor)
-#         else:
-#             loss_2 = ((pred * m - y * m) ** 2).sum() / m.sum()
-
-#         # Loss3: 协方差矩阵对齐
-#         pred_np = pred.squeeze(0).T
-#         y_np = y.squeeze(0).T
-#         if pred_np.shape[1] > 1:
-#             try:
-#                 cov_pred = torch.cov(pred_np)
-#                 cov_y = torch.cov(y_np)
-#                 loss_3 = F.mse_loss(cov_pred, cov_y)
-#             except:
-#                 loss_3 = torch.tensor(0.0, device=device, requires_grad=True)
-#         else:
-#             loss_3 = torch.tensor(0.0, device=device, requires_grad=True)
-
-#         # Loss4: RBF核映射对齐
-#         def rbf_kernel(mat, sigma=1.0):
-#             if mat.shape[0] <= 1:
-#                 return torch.zeros((1, 1), device=mat.device, requires_grad=True)
-#             dist = torch.cdist(mat, mat, p=2) ** 2
-#             return torch.exp(-dist / (2 * sigma ** 2))
-
-#         try:
-#             K_pred = rbf_kernel(pred_np)
-#             K_y = rbf_kernel(y_np)
-#             loss_4 = F.mse_loss(K_pred, K_y)
-#         except:
-#             loss_4 = torch.tensor(0.0, device=device, requires_grad=True)
-
-#         # 加权总损失
-#         total_loss = loss_1 + 0 * loss_2 + 0 * loss_3 + 0 * loss_4
-#         print(f"[Epoch {epoch+1}/{epochs}] Total Loss: {total_loss.item():.6f}")
-#         total_loss.backward()
-#         opt.step()
-
-#         # 保存最佳预测结果
-#         if total_loss.item() < best_loss:
-#             best_loss = total_loss.item()
-#             with torch.no_grad():
-#                 best_imputed = model(x).cpu().squeeze(0).numpy()
-
-#     # 用最优结果进行填补
-#     imputed = best_imputed
-#     filled[mask == 0] = imputed[mask == 0]
-#     return filled
-
-
-
-
-# def impute(original, causal_matrix, model_params, epochs=150, lr=0.02, gpu_id=None):
-#     if gpu_id is not None and torch.cuda.is_available():
-#         device = torch.device(f'cuda:{gpu_id}')
-#     else:
-#         device = torch.device('cpu')
-#     original_copy = original.copy()
-#     # 阶段1: 填补空列 + 高重复列
-#     first_stage_initial_filled = FirstProcess(original_copy)
-#     # 阶段2: 数值扰动增强
-#     initial_filled = SecondProcess(first_stage_initial_filled)
-
-#     mask = (~np.isnan(first_stage_initial_filled)).astype(int)
-#     sequence_len, total_features = initial_filled.shape
-#     final_filled = initial_filled.copy()
-
-#     for target in range(total_features):
-#         # 选择因果特征
-#         inds = list(np.where(causal_matrix[:, target] == 1)[0])
-#         if target not in inds:
-#             inds.append(target)
-#         else:
-#             inds.remove(target)
-#             inds.append(target)
-#         inds = inds[:3] + [target]  # 保留
-
-#         # 构造滞后目标变量
-#         target_shifted = np.roll(initial_filled[:, target], 1)
-#         target_shifted[0] = 0.0
-#         x_data = np.concatenate([initial_filled[:, inds], target_shifted[:, None]], axis=1)
-
-#         x = torch.tensor(x_data.T[np.newaxis, ...], dtype=torch.float32).to(device)
-#         y = torch.tensor(initial_filled[:, target][np.newaxis, :, None], dtype=torch.float32).to(device)
-#         m = torch.tensor((mask[:, target] == 1)[np.newaxis, :, None], dtype=torch.float32).to(device)
-
-#         # 构建模型
-#         input_dim = x.shape[1]
-#         model = ADDSTCN(target, input_size=input_dim, cuda=(device != torch.device('cpu')), **model_params).to(device)
-
-#         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-#         # 编译加速
-#         if hasattr(torch, 'compile'):
-#             try:
-#                 model = torch.compile(model)
-#             except:
-#                 pass
-
-#         # 训练
-#         for epoch in range(1, epochs + 1):
-#             model.train()
-#             optimizer.zero_grad()
-#             pred = model(x)
-#             loss = F.mse_loss(pred * m, y * m)
-#             loss.backward()
-#             optimizer.step()
-
-#         # 推理
-#         model.eval()
-#         with torch.no_grad():
-#             out = model(x).squeeze().cpu().numpy()
-#             to_fill = np.where(mask[:, target] == 0)
-#             to_fill_filtered = to_fill[0]
-#             if len(to_fill_filtered) > 0:
-#                 final_filled[to_fill_filtered, target] = out[to_fill_filtered]
-
-#     return final_filled
-
-def impute_wrapper(task_queue, result_queue, causal_matrix, model_params, epochs, lr, output_dir):
-    while True:
-        task = task_queue.get()
-        if task is None:
-            break
-        idx, file_path, gpu_id = task
+        if torch.cuda.is_available():
+            torch.cuda.set_device(gpu_id)
+            device = torch.device(f'cuda:{gpu_id}')
+        else:
+            device = torch.device('cpu')
 
         try:
-            if gpu_id is not None:
-                os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+            imputed_result, mask, initial_processed = impute(
+                mx,
+                causal_matrix,
+                model_params=model_params,
+                epochs=epochs, lr=lr, gpu_id=gpu_id
+            )
 
-            df = pd.read_csv(file_path)
-            data = df.values.astype(np.float32)
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            gc.collect()
 
-            imputed, mask, initial = impute(data, causal_matrix, model_params, epochs, lr, gpu_id=0)
-            # 构造保存路径
             filename = os.path.basename(file_path).replace('.csv', '_imputed.csv')
             save_path = os.path.join(output_dir, filename)
-            pd.DataFrame(imputed).to_csv(save_path, index=False)
+            pd.DataFrame(imputed_result).to_csv(save_path, index=False)
 
-            result_queue.put((idx, file_path, save_path))
+            print(f"✅ 完成填补: {file_path} → {save_path}")
+            return idx, save_path
         except Exception as e:
-            result_queue.put((idx, file_path, f"Error: {e}"))
+            print(f"❌ 填补失败: {file_path}, 错误: {e}")
+            return idx, f"Error: {e}"
 
 
 def parallel_impute(
-    file_paths,  # 这个参数应该改名为 data_dir 更清楚
-    causal_matrix,
-    model_params,
-    epochs=150,
+    file_paths,             # str 目录路径（如 ./data/mimic-iii）
+    causal_matrix,          # 因果图 cg
+    model_params,           # 填补模型参数
+    epochs=100,
     lr=0.02,
     simultaneous_per_gpu=2,
-    max_workers=None,
     output_dir="imputed_results"
 ):
-    try:
-        set_start_method('spawn')
-    except RuntimeError:
-        pass
+    num_gpus = torch.cuda.device_count()
+    if num_gpus == 0:
+        print("[INFO] 没有可用 GPU，使用 CPU 顺序处理")
+        num_gpus = 1
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # ✅ 修复：正确处理输入路径
-    if isinstance(file_paths, str) and os.path.isdir(file_paths):
-        # 如果传入的是目录路径，获取所有CSV文件
-        file_list = [os.path.join(file_paths, f) for f in os.listdir(file_paths) if f.endswith('.csv')]
-        print(f"从目录 '{file_paths}' 找到 {len(file_list)} 个CSV文件")
-    elif isinstance(file_paths, list):
-        # 如果传入的是文件列表
-        file_list = file_paths
-        print(f"收到文件列表，共 {len(file_list)} 个文件")
-    else:
-        raise ValueError("file_paths must be a directory path or list of file paths")
+    print(f"[INFO] 使用 {num_gpus} 个 GPU，每个 GPU 最多并行 {simultaneous_per_gpu} 个任务，总进程数: {num_gpus * simultaneous_per_gpu}")
 
-    if len(file_list) == 0:
-        print("❌ 错误: 没有找到任何CSV文件")
-        return {}
+    # ✅ 获取文件路径列表
+    file_list = [os.path.join(file_paths, f) for f in os.listdir(file_paths) if f.endswith('.csv')]
+    print(f"[INFO] 找到 {len(file_list)} 个待处理文件")
 
-    # ✅ 添加调试信息
-    print(f"输出目录: {output_dir}")
-    print(f"前3个文件: {file_list[:3]}")
+    args_list = []
+    for idx, file_path in enumerate(file_list):
+        df = pd.read_csv(file_path)
+        data = df.values.astype(np.float32)
+        gpu_id = idx % num_gpus
+        args_list.append((idx, data, file_path, causal_matrix, gpu_id, output_dir, model_params, epochs, lr))
+    with mp.Pool(processes=num_gpus * simultaneous_per_gpu) as pool:
+        results = list(tqdm(pool.imap(impute_wrapper, args_list), total=len(args_list), desc="Filling"))
 
-    num_gpus = torch.cuda.device_count()
-    if num_gpus == 0:
-        print("⚠️ 警告: 未检测到GPU，使用CPU模式")
-        # CPU模式下也可以运行，不要抛出错误
-        total_workers = min(4, len(file_list))  # CPU模式限制进程数
-    else:
-        total_workers = num_gpus * simultaneous_per_gpu
-        
-    if max_workers:
-        total_workers = min(total_workers, max_workers)
+    results.sort(key=lambda x: x[0])
+    output_paths = {file_list[idx]: result for idx, result in results}
+    return output_paths
 
-    print(f"总工作进程数: {total_workers}")
-
-    task_queue = Queue()
-    result_queue = Queue()
-
-    # 添加任务 - 使用正确的文件列表
-    for idx, file_path in enumerate(file_list):  # ✅ 使用 file_list 而不是 file_paths
-        assigned_gpu = idx % num_gpus if num_gpus > 0 else None
-        task_queue.put((idx, file_path, assigned_gpu))
-        
-        # ✅ 添加调试信息
-        if idx < 5:
-            print(f"任务 {idx}: {file_path} -> GPU {assigned_gpu}")
-
-    # 添加终止信号
-    for _ in range(total_workers):
-        task_queue.put(None)
-
-    # 启动 workers
-    workers = []
-    for worker_id in range(total_workers):
-        p = Process(
-            target=impute_wrapper,
-            args=(task_queue, result_queue, causal_matrix, model_params, epochs, lr, output_dir)
-        )
-        p.start()
-        workers.append(p)
-        print(f"启动工作进程 {worker_id+1}/{total_workers}")
-
-    results = {}
-    completed_count = 0
-    
-    # ✅ 修复进度条 - 使用正确的总数
-    with tqdm(total=len(file_list), desc="Imputing and Saving") as pbar:
-        for _ in range(len(file_list)):  # ✅ 使用 file_list 的长度
-            idx, path, result = result_queue.get()
-            results[path] = result
-            completed_count += 1
-            
-            # ✅ 添加详细的结果信息
-            if isinstance(result, str) and result.startswith("Error"):
-                print(f"❌ 文件 {os.path.basename(path)} 失败: {result}")
-            else:
-                print(f"✅ 文件 {os.path.basename(path)} 完成: {result}")
-            
-            pbar.update(1)
-
-    # 等待所有进程完成
-    for p in workers:
-        p.join()
-
-    print(f"总体完成情况: {completed_count}/{len(file_list)} 个文件")
-    
-    # ✅ 检查输出目录
-    if os.path.exists(output_dir):
-        output_files = [f for f in os.listdir(output_dir) if f.endswith('.csv')]
-        print(f"输出目录 '{output_dir}' 中有 {len(output_files)} 个文件")
-        if len(output_files) > 0:
-            print(f"前3个输出文件: {output_files[:3]}")
-    else:
-        print(f"❌ 输出目录 '{output_dir}' 不存在")
-
-    return results
 def agregate(initial_filled_array, n_cluster):
     # Step 1: 每个样本按列取均值，构造聚类输入
     data = np.array([np.nanmean(x, axis=0) for x in initial_filled_array])

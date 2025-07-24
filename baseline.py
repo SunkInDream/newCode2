@@ -80,18 +80,72 @@ def random_impu(mx):
     return mx
 
 
+# def knn_impu(mx, k=5):
+#     mx = mx.copy()
+#     all_nan_cols = np.all(np.isnan(mx), axis=0)
+
+#     # 计算全局均值（不为 NaN）
+#     global_mean = np.nanmean(mx)
+
+#     # 全空列先填全局均值，避免 KNNImputer 报错
+#     mx[:, all_nan_cols] = global_mean
+
+#     imputer = KNNImputer(n_neighbors=k)
+#     return imputer.fit_transform(mx)
+
 def knn_impu(mx, k=5):
+    import time
+    start_time = time.time()
+    
+    print(f"🔍 开始KNN填补: 数据形状={mx.shape}, 缺失值={np.isnan(mx).sum()}")
+    
     mx = mx.copy()
+    
+    # ✅ 1. 设置单线程
+    import os
+    print("⚙️ 设置单线程模式...")
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    
+    # ✅ 2. 处理全空列
+    print("🔧 检查全空列...")
     all_nan_cols = np.all(np.isnan(mx), axis=0)
-
-    # 计算全局均值（不为 NaN）
-    global_mean = np.nanmean(mx)
-
-    # 全空列先填全局均值，避免 KNNImputer 报错
-    mx[:, all_nan_cols] = global_mean
-
-    imputer = KNNImputer(n_neighbors=k)
-    return imputer.fit_transform(mx)
+    if all_nan_cols.any():
+        print(f"   发现 {all_nan_cols.sum()} 个全空列，用全局均值填充")
+        global_mean = np.nanmean(mx)
+        if np.isnan(global_mean):
+            global_mean = 0.0
+        mx[:, all_nan_cols] = global_mean
+    else:
+        print("   无全空列")
+    
+    # ✅ 3. 调整k值
+    print("📊 调整KNN参数...")
+    valid_samples = (~np.isnan(mx)).sum(axis=0).min()
+    original_k = k
+    k = min(k, max(1, valid_samples - 1))
+    print(f"   k值: {original_k} -> {k}")
+    
+    # ✅ 4. 开始KNN填补
+    print("🚀 开始KNN计算...")
+    try:
+        from sklearn.impute import KNNImputer
+        imputer = KNNImputer(n_neighbors=k)
+        
+        print("   创建KNNImputer完成")
+        print("   开始fit_transform...")
+        
+        result = imputer.fit_transform(mx)
+        
+        elapsed = time.time() - start_time
+        print(f"✅ KNN填补完成，耗时 {elapsed:.2f} 秒")
+        return result
+        
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"❌ KNN填补在 {elapsed:.2f} 秒后失败: {e}")
+        raise e
 
 def mice_impu(mx, max_iter=5):
     """改进：处理全空列 + 最简版MICE填补"""

@@ -13,8 +13,8 @@ model_params = {
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
-    data_arr = Prepare_data('./data/air')
-    cg = causal_discovery(data_arr, 20, isStandard=False, standard_cg='./causality_matrices/finance_causality_matrix.csv')
+    # data_arr = Prepare_data('./data/III')
+    # cg = causal_discovery(data_arr, 20, isStandard=False, standard_cg='./causality_matrices/finance_causality_matrix.csv')
 
     # tar = pd.read_csv('./2013-03-07_dig_missing.csv')
     # res,_,_ = impute(tar,cg,model_params,gpu_id=0)
@@ -24,11 +24,11 @@ if __name__ == "__main__":
     # res = evaluate_causal_discovery_from_file('./causality_matrices/my_lorenz_causality_matrix.csv', './causality_matrices/lorenz_causality_matrix.csv')
     # print(res)
 
-    # res = parallel_impute('./data/mimic-iii', cg, model_params, epochs=100, lr=0.02, output_dir='./data_imputed/my_model/mimic-iii')
-    parallel_mse_evaluate(data_arr, cg)
+    # res = parallel_impute('./data/III', cg, model_params, epochs=100, lr=0.02, output_dir='./data_imputed/my_model/III')
+    # parallel_mse_evaluate(data_arr, cg)
 
-    # data_arr1, label_arr1 = Prepare_data('./data_imputed/my_model/mimic-iii', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
-    # results = evaluate_downstream(data_arr1, label_arr1, k=4, epochs=100, lr=0.02)
+    data_arr1, label_arr1 = Prepare_data('./data/downstreamIII', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')
+    results = evaluate_downstream(data_arr1, label_arr1, k=4, epochs=100, lr=0.02)
 
     
 

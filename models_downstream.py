@@ -171,10 +171,15 @@ def Prepare_data(data_dir, label_file=None, id_name=None, label_name=None):
 
         return data_arr, label_arr
         
-def train_fold(fold_args):
-    fold, train_idx, val_idx, data_arr, label_arr, epochs, lr, gpu_id = fold_args
-    torch.cuda.set_device(gpu_id)
-    device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
+def train_fold(fold_args): 
+    import os
+    import torch
+    fold, train_idx, val_idx, data_arr, label_arr, epochs, lr, gpu_uuid = fold_args
+
+    # 限制只可见一个GPU
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_uuid)
+    torch.cuda.set_device(0)  # 对每个进程来说，只可见一个 GPU，其编号是 0
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     dataset = MatrixDataset(data_arr, label_arr)
     train_loader = DataLoader(Subset(dataset, train_idx), batch_size=16, shuffle=True)
@@ -217,38 +222,21 @@ def train_fold(fold_args):
     )
 
 
-def checkee(omega):
-    alpha = np.mean(omega, axis=0)
-    beta = np.std(omega, axis=0) + 1e-6
-    omega -= alpha
-    omega /= beta
-    zeta = np.random.normal(0, 0.01, size=omega.shape)
-    omega += zeta
-    sigma = np.random.choice(omega.shape[1], 30, replace=False)
-    omega[:, sigma] = np.nan
-    omega[omega > 9.9] = 9.9
-    omega[omega < -9.9] = -9.9
-
 
 def train_and_evaluate(data_arr, label_arr, k=5, epochs=200, lr=0.02):
+    from multiprocessing import get_context  # ✅ 正确方式
     kf = KFold(n_splits=k, shuffle=True, random_state=42)
     num_gpus = torch.cuda.device_count()
     tasks = []
-    for fold, (train_idx, val_idx) in enumerate(kf.split(data_arr)):
-        gpu_id = fold % num_gpus  # 轮流分配 GPU
-        tasks.append((fold, train_idx, val_idx, data_arr, label_arr, epochs, lr, gpu_id))
 
-    with mp.get_context("spawn").Pool(processes=min(k, num_gpus)) as pool:
+    for fold, (train_idx, val_idx) in enumerate(kf.split(data_arr)):
+        physical_gpu_id = fold % num_gpus
+        tasks.append((fold, train_idx, val_idx, data_arr, label_arr, epochs, lr, physical_gpu_id))
+
+    with get_context("spawn").Pool(processes=min(k, num_gpus)) as pool:  # ✅ 使用 spawn 上下文，不会重复设置
         results = pool.map(train_fold, tasks)
 
     accs, precs, recs, f1s, aurocs = zip(*results)
-    print("\n=== Average over folds ===")
-    print(f"Accuracy : {np.mean(accs):.2%} ± {np.std(accs):.2%}")
-    print(f"Precision: {np.mean(precs):.2%} ± {np.std(precs):.2%}")
-    print(f"Recall   : {np.mean(recs):.2%} ± {np.std(recs):.2%}")
-    print(f"F1       : {np.mean(f1s):.2%} ± {np.std(f1s):.2%}")
-    print(f"AUROC    : {np.mean(aurocs):.4f} ± {np.std(aurocs):.4f}")
-
     return {
         'Accuracy': (np.mean(accs), np.std(accs)),
         'Precision': (np.mean(precs), np.std(precs)),
@@ -257,84 +245,45 @@ def train_and_evaluate(data_arr, label_arr, k=5, epochs=200, lr=0.02):
         'AUROC': (np.mean(aurocs), np.std(aurocs)),
     }
 
+
 def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
     """
     评估多种插补方法的性能
-    
-    参数:
-        data_arr: 原始数据数组（包含缺失值）
-        label_arr: 标签数组
-        k: 交叉验证折数
-        epochs: 训练轮数
-        lr: 学习率
-        
-    返回:
-        dict: 包含各种插补方法评估结果的字典
     """
     results = {}
     
-    # 因果插补方法 (假设data_imputed目录中已有数据)
-    data_arr_causal, label_arr_causal = Prepare_data('./data_imputed/my_model/mimic', './static_tag.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
-    accs = train_and_evaluate(data_arr_causal, label_arr_causal, k=k, epochs=epochs, lr=lr)
-    results['Causal-Impute'] = accs
+    # ✅ 定义要评估的方法列表
+    methods = [
+        # ('Scit-Impute', lambda: Prepare_data('./data_imputed/my_model/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        # ('Zero-Impute', lambda: ([zero_impu(matrix) for matrix in data_arr], label_arr)),
+        ('MICE-Impute', lambda: ([mice_impu(matrix) for matrix in tqdm(data_arr, desc="MICE填补")], label_arr)),
+        # ('Random-Impute', lambda: ([random_impu(matrix) for matrix in data_arr], label_arr)),
+        # ('KNN-Impute', lambda: ([knn_impu(matrix) for matrix in data_arr], label_arr)),
+        # ('Mean-Impute', lambda: ([mean_impu(matrix) for matrix in data_arr], label_arr)),
+        # ('BFill-Impute', lambda: ([bfill_impu(matrix) for matrix in data_arr], label_arr)),
+        # ('Miracle-Impute', lambda: ([miracle_impu(matrix) for matrix in data_arr], label_arr)),
+        ('SAITS-Impute', lambda: ([saits_impu(matrix) for matrix in data_arr], label_arr)),
+        ('TimeMixerPP-Impute', lambda: ([timemixerpp_impu(matrix) for matrix in data_arr], label_arr)),
+        ('TEFN-Impute', lambda: ([tefn_impu(matrix) for matrix in data_arr], label_arr)),
+        ('TSDE-Impute', lambda: ([tsde_impu(matrix) for matrix in data_arr], label_arr)),
+        ('GRIN-Impute', lambda: ([grin_impu(matrix) for matrix in data_arr], label_arr)),
+        ('TimesNet-Impute', lambda: ([timesnet_impu(matrix) for matrix in data_arr], label_arr)),
+    ]
     
-    # 零值插补
-    data_arr_zero = [zero_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_zero, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Zero-Impute'] = accs
+    # ✅ 添加进度条
+    for method_name, data_func in tqdm(methods, desc="评估插补方法"):
+        print(f"\n🔄 正在评估 {method_name}...")
+        try:
+            data_arr_method, label_arr_method = data_func()
+            accs = train_and_evaluate(data_arr_method, label_arr_method, k=k, epochs=epochs, lr=lr)
+            results[method_name] = accs
+            print(f"✅ {method_name} 完成")
+        except Exception as e:
+            print(f"❌ {method_name} 失败: {e}")
+            continue
     
-    # 中位数插补
-    data_arr_median = [median_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_median, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Median-Impute'] = accs
-    
-    # 众数插补
-    data_arr_mode = [mode_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_mode, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Mode-Impute'] = accs
-    
-    # 随机插补
-    data_arr_random = [random_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_random, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Random-Impute'] = accs
-    
-    # KNN插补
-    data_arr_knn = [knn_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_knn, label_arr, k=k, epochs=epochs, lr=lr)
-    results['KNN-Impute'] = accs
-    
-    # 均值插补
-    data_arr_mean = [mean_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_mean, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Mean-Impute'] = accs
-    
-    # 前向填充插补
-    data_arr_ffill = [ffill_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_ffill, label_arr, k=k, epochs=epochs, lr=lr)
-    results['FFill-Impute'] = accs
-    
-    # 后向填充插补
-    data_arr_bfill = [bfill_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_bfill, label_arr, k=k, epochs=epochs, lr=lr)
-    results['BFill-Impute'] = accs
-    
-    data_arr_miracle = [miracle_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_miracle, label_arr, k=k, epochs=epochs, lr=lr)
-    results['Miracle-Impute'] = accs
-    
-    data_arr_saits = [saits_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_saits, label_arr, k=k, epochs=epochs, lr=lr)
-    results['SAITS-Impute'] = accs
-    
-    data_arr_timemixerpp = [timemixerpp_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_timemixerpp, label_arr, k=k, epochs=epochs, lr=lr)
-    results['TimeMixerPP-Impute'] = accs
-    
-    data_arr_tefn = [tefn_impu(matrix) for matrix in data_arr]
-    accs = train_and_evaluate(data_arr_tefn, label_arr, k=k, epochs=epochs, lr=lr)
-    results['TEFN-Impute'] = accs
+    # 生成结果表格...（保持原代码不变）
     table = []
-
     for method, metrics in results.items():
         row = {
             'Method': method,
@@ -347,10 +296,7 @@ def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
         table.append(row)
 
     df_results = pd.DataFrame(table)
-    
     print(df_results)
-
-    # 或保存为 CSV 文件
     df_results.to_csv('imputation_comparison_results.csv', index=False)
     return results
 
