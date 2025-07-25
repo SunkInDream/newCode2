@@ -130,6 +130,114 @@ class SimpleLSTMClassifier(nn.Module):
         out = self.classifier(pooled)
         
         return out
+class SimpleGRUClassifier(nn.Module): 
+    def __init__(self, input_dim, hidden_dim=128, num_layers=2, dropout=0.3,  
+                 use_batch_norm=True, use_layer_norm=False):
+        super(SimpleGRUClassifier, self).__init__()
+        
+        self.use_batch_norm = use_batch_norm
+        self.use_layer_norm = use_layer_norm
+        
+        # 输入标准化层
+        if use_batch_norm:
+            self.input_norm = nn.BatchNorm1d(input_dim)
+        elif use_layer_norm:
+            self.input_norm = nn.LayerNorm(input_dim)
+        else:
+            self.input_norm = None
+        
+        # 使用双向GRU
+        self.gru = nn.GRU(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=True
+        )
+        
+        # GRU输出标准化
+        if use_batch_norm:
+            self.lstm_norm = nn.BatchNorm1d(hidden_dim * 2)
+        elif use_layer_norm:
+            self.lstm_norm = nn.LayerNorm(hidden_dim * 2)
+        else:
+            self.lstm_norm = None
+        
+        # 注意力机制
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim * 2,
+            num_heads=8,
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        # 注意力输出标准化
+        if use_batch_norm:
+            self.attention_norm = nn.BatchNorm1d(hidden_dim * 2)
+        elif use_layer_norm:
+            self.attention_norm = nn.LayerNorm(hidden_dim * 2)
+        else:
+            self.attention_norm = None
+        
+        # 分类头
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.BatchNorm1d(hidden_dim) if use_batch_norm else nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity(),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 32),
+            nn.BatchNorm1d(32) if use_batch_norm else nn.LayerNorm(32) if use_layer_norm else nn.Identity(),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1)
+        )
+
+    def forward(self, x):
+        # x: [batch_size, seq_len, num_features]
+        batch_size, seq_len, num_features = x.shape
+        
+        # 1. 输入标准化
+        if self.input_norm is not None:
+            if self.use_batch_norm:
+                x_reshaped = x.view(-1, num_features)
+                x_normalized = self.input_norm(x_reshaped)
+                x = x_normalized.view(batch_size, seq_len, num_features)
+            else:
+                x = self.input_norm(x)
+        
+        # 2. GRU处理
+        gru_out, _ = self.gru(x)  # [batch_size, seq_len, hidden_dim*2]
+        
+        # 3. GRU输出标准化
+        if self.lstm_norm is not None:
+            if self.use_batch_norm:
+                lstm_reshaped = gru_out.reshape(-1, gru_out.size(-1))
+                lstm_normalized = self.lstm_norm(lstm_reshaped)
+                gru_out = lstm_normalized.view(batch_size, seq_len, -1)
+            else:
+                gru_out = self.lstm_norm(gru_out)
+        
+        # 4. 自注意力机制
+        attn_out, attention_weights = self.attention(gru_out, gru_out, gru_out)
+        
+        # 5. 注意力输出标准化
+        if self.attention_norm is not None:
+            if self.use_batch_norm:
+                attn_reshaped = attn_out.reshape(-1, attn_out.size(-1))
+                attn_normalized = self.attention_norm(attn_reshaped)
+                attn_out = attn_normalized.view(batch_size, seq_len, -1)
+            else:
+                attn_out = self.attention_norm(attn_out)
+        
+        # 6. 时间维度聚合
+        pooled = torch.mean(attn_out, dim=1)  # [batch_size, hidden_dim*2]
+        
+        # 7. 分类
+        out = self.classifier(pooled)
+        
+        return out
+
 class MatrixDataset(Dataset):
     def __init__(self, matrices, labels):
         self.matrices = matrices  # list of [seq_len, input_dim] tensors or arrays
@@ -185,7 +293,7 @@ def train_fold(fold_args):
     train_loader = DataLoader(Subset(dataset, train_idx), batch_size=16, shuffle=True)
     val_loader = DataLoader(Subset(dataset, val_idx), batch_size=16)
 
-    model = SimpleLSTMClassifier(input_dim=data_arr[0].shape[1]).to(device)
+    model = SimpleGRUClassifier(input_dim=data_arr[0].shape[1]).to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
@@ -254,20 +362,20 @@ def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
     
     # ✅ 定义要评估的方法列表
     methods = [
-        # ('Scit-Impute', lambda: Prepare_data('./data_imputed/my_model/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
-        # ('Zero-Impute', lambda: ([zero_impu(matrix) for matrix in data_arr], label_arr)),
-        ('MICE-Impute', lambda: ([mice_impu(matrix) for matrix in tqdm(data_arr, desc="MICE填补")], label_arr)),
-        # ('Random-Impute', lambda: ([random_impu(matrix) for matrix in data_arr], label_arr)),
-        # ('KNN-Impute', lambda: ([knn_impu(matrix) for matrix in data_arr], label_arr)),
-        # ('Mean-Impute', lambda: ([mean_impu(matrix) for matrix in data_arr], label_arr)),
-        # ('BFill-Impute', lambda: ([bfill_impu(matrix) for matrix in data_arr], label_arr)),
-        # ('Miracle-Impute', lambda: ([miracle_impu(matrix) for matrix in data_arr], label_arr)),
-        ('SAITS-Impute', lambda: ([saits_impu(matrix) for matrix in data_arr], label_arr)),
-        ('TimeMixerPP-Impute', lambda: ([timemixerpp_impu(matrix) for matrix in data_arr], label_arr)),
-        ('TEFN-Impute', lambda: ([tefn_impu(matrix) for matrix in data_arr], label_arr)),
-        ('TSDE-Impute', lambda: ([tsde_impu(matrix) for matrix in data_arr], label_arr)),
-        ('GRIN-Impute', lambda: ([grin_impu(matrix) for matrix in data_arr], label_arr)),
-        ('TimesNet-Impute', lambda: ([timesnet_impu(matrix) for matrix in data_arr], label_arr)),
+        ('Scit-Impute', lambda: Prepare_data('./data_imputed/my_model/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('Zero-Impute', lambda: ([zero_impu(matrix) for matrix in data_arr], label_arr)),
+        ('MICE-Impute', lambda: Prepare_data('./data_imputed/mice/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('Random-Impute', lambda: ([random_impu(matrix) for matrix in data_arr], label_arr)),
+        ('KNN-Impute', lambda:  Prepare_data('./data_imputed/knn/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('Mean-Impute', lambda: ([mean_impu(matrix) for matrix in data_arr], label_arr)),
+        ('BFill-Impute', lambda: ([bfill_impu(matrix) for matrix in data_arr], label_arr)),
+        ('Miracle-Impute', lambda:  Prepare_data('./data_imputed/miracle/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('SAITS-Impute', lambda: Prepare_data('./data_imputed/saits/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('TimeMixerPP-Impute', lambda:  Prepare_data('./data_imputed/timemixerpp/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('TEFN-Impute', lambda: Prepare_data('./data_imputed/tefn/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('TSDE-Impute', lambda: Prepare_data('./data_imputed/tsde/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('GRIN-Impute', lambda:  Prepare_data('./data_imputed/grin/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('TimesNet-Impute', lambda:  Prepare_data('./data_imputed/timesnet/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
     ]
     
     # ✅ 添加进度条
@@ -277,7 +385,7 @@ def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
             data_arr_method, label_arr_method = data_func()
             accs = train_and_evaluate(data_arr_method, label_arr_method, k=k, epochs=epochs, lr=lr)
             results[method_name] = accs
-            print(f"✅ {method_name} 完成")
+            print(f"✅ {method_name} 完成，结果：{accs}")
         except Exception as e:
             print(f"❌ {method_name} 失败: {e}")
             continue
