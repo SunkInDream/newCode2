@@ -393,16 +393,6 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
     if cg_total is None:
         raise RuntimeError("所有任务都失败，未能得到有效的因果矩阵")
 
-    # # Step 5: 选 Top-3 构建最终因果图
-    # np.fill_diagonal(cg_total, 0)
-    # new_matrix = np.zeros_like(cg_total)
-    # for col in range(cg_total.shape[1]):
-    #     col_values = cg_total[:, col]
-    #     if np.count_nonzero(col_values) < 3:
-    #         new_matrix[:, col] = 1
-    #     else:
-    #         top3 = np.argsort(col_values)[-3:]
-    #         new_matrix[top3, col] = 1
        # Step 5: 选 Top-4 构建最终因果图
     np.fill_diagonal(cg_total, 0)
     new_matrix = np.zeros_like(cg_total)
