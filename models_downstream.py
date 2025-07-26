@@ -362,20 +362,20 @@ def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02):
     
     # ✅ 定义要评估的方法列表
     methods = [
-        ('Scit-Impute', lambda: Prepare_data('./data_imputed/my_model/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
-        ('Zero-Impute', lambda: ([zero_impu(matrix) for matrix in data_arr], label_arr)),
-        ('MICE-Impute', lambda: Prepare_data('./data_imputed/mice/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
-        ('Random-Impute', lambda: ([random_impu(matrix) for matrix in data_arr], label_arr)),
-        ('KNN-Impute', lambda:  Prepare_data('./data_imputed/knn/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
-        ('Mean-Impute', lambda: ([mean_impu(matrix) for matrix in data_arr], label_arr)),
-        ('BFill-Impute', lambda: ([bfill_impu(matrix) for matrix in data_arr], label_arr)),
-        ('Miracle-Impute', lambda:  Prepare_data('./data_imputed/miracle/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
-        ('SAITS-Impute', lambda: Prepare_data('./data_imputed/saits/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
-        ('TimeMixerPP-Impute', lambda:  Prepare_data('./data_imputed/timemixerpp/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
-        ('TEFN-Impute', lambda: Prepare_data('./data_imputed/tefn/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
-        ('TSDE-Impute', lambda: Prepare_data('./data_imputed/tsde/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
-        ('GRIN-Impute', lambda:  Prepare_data('./data_imputed/grin/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
-        ('TimesNet-Impute', lambda:  Prepare_data('./data_imputed/timesnet/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')),
+        ('Scit-Impute', lambda: Prepare_data('./data_imputed/my_model/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        # ('Zero-Impute', lambda: ([zero_impu(matrix) for matrix in data_arr], label_arr)),
+        # ('MICE-Impute', lambda: Prepare_data('./data_imputed/mice/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        # ('Random-Impute', lambda: ([random_impu(matrix) for matrix in data_arr], label_arr)),
+        # ('KNN-Impute', lambda:  Prepare_data('./data_imputed/knn/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        # ('Mean-Impute', lambda: ([mean_impu(matrix) for matrix in data_arr], label_arr)),
+        # ('BFill-Impute', lambda: ([bfill_impu(matrix) for matrix in data_arr], label_arr)),
+        # ('Miracle-Impute', lambda:  Prepare_data('./data_imputed/miracle/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        ('SAITS-Impute', lambda: Prepare_data('./data_imputed/saits/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        # ('TimeMixerPP-Impute', lambda:  Prepare_data('./data_imputed/timemixerpp/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        # ('TEFN-Impute', lambda: Prepare_data('./data_imputed/tefn/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        # ('TSDE-Impute', lambda: Prepare_data('./data_imputed/tsde/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        ('GRIN-Impute', lambda:  Prepare_data('./data_imputed/grin/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'FirstICU24_AKI_ALL')),
+        ('TimesNet-Impute', lambda:  Prepare_data('./data_imputed/timesnet/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')),
     ]
     
     # ✅ 添加进度条

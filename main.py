@@ -27,7 +27,7 @@ if __name__ == "__main__":
     # res = parallel_impute('./data/III', cg, model_params, epochs=100, lr=0.02, output_dir='./data_imputed/my_model/III')
     # parallel_mse_evaluate(data_arr, cg)
 
-    data_arr1, label_arr1 = Prepare_data('./data/downstreamIII', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'sepsis_all')
+    data_arr1, label_arr1 = Prepare_data('./data/downstreamIII', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', 'DIEINHOSPITAL')
     results = evaluate_downstream(data_arr1, label_arr1, k=4, epochs=100, lr=0.02)
 
     

@@ -35,7 +35,7 @@ def zero_impu(mx):
 #     print(f"🔍 zero_impu 输出: 零值数量 = {(result == 0).sum()}")
 #     return result
 def mean_impu(mx):
-    mx = mx.copy()
+    # mx = mx.copy()
     # col_means = np.nanmean(mx, axis=0)
     # inds = np.where(np.isnan(mx))
     # mx[inds] = np.take(col_means, inds[1])
@@ -300,37 +300,6 @@ def saits_impu(mx, epochs=None, d_model=None, n_layers=None, device=None):
         print(f"SAITS失败: {e}")
         return mean_impu(mx)
 
-def saits_impu(mx, epochs=50, d_model=32, n_layers=2, n_heads=4, 
-               d_k=8, d_v=8, d_ffn=16, dropout=0.4, device=None):
-    from pypots.imputation import SAITS
-    global_mean = np.nanmean(mx)
-    all_nan_cols = np.all(np.isnan(mx), axis=0)
-    if all_nan_cols.any():
-        print(f"发现 {all_nan_cols.sum()} 列全为NaN，这些列将用填充")
-        mx[:, all_nan_cols] = global_mean
-    mx = mx.copy()
-    n_steps, n_features = mx.shape
-    data_3d = mx[np.newaxis, :, :]  # shape: (1, n_steps, n_features)
-    saits = SAITS(
-        n_steps=n_steps,
-        n_features=n_features,
-        n_layers=n_layers,
-        d_model=d_model,
-        n_heads=n_heads,
-        d_k=d_k,
-        d_v=d_v,
-        d_ffn=d_ffn,
-        dropout=dropout,
-        epochs=epochs,
-        device=device,
-    )
-    
-    train_set = {"X": data_3d}
-    saits.fit(train_set)
-    test_set = {"X": data_3d}
-    imputed_data_3d = saits.impute(test_set)
-    imputed_data_2d = imputed_data_3d[0]  # shape: (n_steps, n_features)
-    return imputed_data_2d
 
 def timemixerpp_impu(mx):
     import numpy as np
