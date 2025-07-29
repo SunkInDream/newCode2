@@ -43,12 +43,34 @@ def random_impu(mx):
     mx[inds] = np.random.choice(non_nan_values, size=len(inds[0]), replace=True)
     return mx
 
-def knn_impu(mx, k=5):
+def knn_impu(mx, k=3):
     mx = mx.copy()
     from sklearn.impute import KNNImputer
-    imputer = KNNImputer(n_neighbors=k)
-    result = imputer.fit_transform(mx)
-    return result
+    
+    # ✅ 记录原始形状
+    original_shape = mx.shape
+    
+    # ✅ 确保k不超过有效样本数
+    non_nan_rows = np.sum(~np.isnan(mx).any(axis=1))
+    if non_nan_rows == 0:
+        # 如果所有行都有缺失，用均值填补
+        return zero_impu(mx)
+    
+    k = min(k, max(1, non_nan_rows - 1))
+    
+    try:
+        imputer = KNNImputer(n_neighbors=k)
+        result = imputer.fit_transform(mx)
+        
+        # ✅ 确保输出形状与输入一致
+        if result.shape != original_shape:
+            result = result[:original_shape[0], :original_shape[1]]
+            
+        return result
+        
+    except Exception as e:
+        print(f"KNN imputation failed: {e}, falling back to mean imputation")
+        return mean_impu(mx)
         
 
 def mice_impu(mx, max_iter=5):

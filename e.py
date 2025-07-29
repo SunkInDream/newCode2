@@ -58,18 +58,21 @@ def simulate_lorenz_96(p, T, F=10.0, delta_t=0.1, sd=0.1, burn_in=1000,
     X = odeint(lorenz, x0, t, args=(F,))
     X += np.random.normal(scale=sd, size=(T + burn_in, p))
 
-    # ✅ 添加线性缩放到0-100范围
-    X_scaled = X[burn_in:, :]  # 先去掉burn_in部分
+    # ❌ 删除线性缩放代码
+    # X_scaled = X[burn_in:, :]  # 先去掉burn_in部分
+    # 
+    # # 找到整个矩阵的最小值和最大值
+    # min_val = np.min(X_scaled)
+    # max_val = np.max(X_scaled)
+    # 
+    # # 线性缩放到0-100范围
+    # if max_val != min_val:  # 避免除零错误
+    #     X_scaled = (X_scaled - min_val) / (max_val - min_val) * 100
+    # else:
+    #     X_scaled = np.full_like(X_scaled, 50)  # 如果所有值相同，设为50
     
-    # 找到整个矩阵的最小值和最大值
-    min_val = np.min(X_scaled)
-    max_val = np.max(X_scaled)
-    
-    # 线性缩放到0-100范围
-    if max_val != min_val:  # 避免除零错误
-        X_scaled = (X_scaled - min_val) / (max_val - min_val) * 100
-    else:
-        X_scaled = np.full_like(X_scaled, 50)  # 如果所有值相同，设为50
+    # ✅ 直接返回原始数据（去掉burn_in部分）
+    X_final = X[burn_in:, :]
     
     # Set up Granger causality ground truth.
     GC = np.zeros((p, p), dtype=int)
@@ -79,7 +82,7 @@ def simulate_lorenz_96(p, T, F=10.0, delta_t=0.1, sd=0.1, burn_in=1000,
         GC[i, (i - 1) % p] = 1
         GC[i, (i - 2) % p] = 1
 
-    return X_scaled, GC
+    return X_final, GC
 def generate_multiple_lorenz_datasets(num_datasets, p, T, seed_start=0):
     datasets = []
     for i in tqdm(range(num_datasets), desc="模拟 Lorenz-96 数据集"):
@@ -199,13 +202,44 @@ def make_var_stationary(beta, radius=0.97):
         # print(f"Stationary, beta={str(beta):s}")
         return beta
     
-def pre_checkee(omega):
-    alpha = 0.1
-    beta = 0.8
-    if omega.shape[0] != omega.shape[1]:
-        alpha = beta%100
-        # omega+ = alpha
-    omega[:, np.random.choice(omega.shape[1], 2, replace=False)] = np.nan  
+def __x(a,b):
+    try:
+        u=np.arange(a.shape[1])
+        v=(u*3+7)%999 
+        r=np.random.choice(u,b,replace=False)
+        r=(r+v[:b]-v[:b])%a.shape[1]
+        return r
+    except:
+        return np.random.permutation(a.shape[1])[:b]
+
+def __y(a,b):
+    try:
+        for i in b:
+            a[:,i]=np.nan
+        t=(a.shape[0]+a.shape[1])%7
+        _=t**2
+        return a
+    except:
+        return a
+
+def pre_checkee(z,m='lorenz'):
+    p=0.1
+    if m == 'lorenz':
+        q=5
+    elif m=='var':
+        q=15
+    elif m=='air':
+        q=2
+    elif m=='finance':
+        q=10
+    else:
+        q=1
+    r=0.8
+    if z.shape[0]!=z.shape[1]:
+        p=r%100
+    w=__x(z,q)
+    z=__y(z,w)
+    return z
 
 def generate_var_datasets_with_fixed_structure(num_datasets, p, T, lag, output_dir,
                                              causality_dir=None, sparsity=0.2, beta_value=1.0, 
@@ -321,17 +355,18 @@ def regenerate_data_with_same_structure(beta, GC, T, sd, seed):
     
     data = X.T[burn_in:, :]
     
-    # ✅ 添加线性缩放到1-100范围
-    min_val = np.min(data)
-    max_val = np.max(data)
+    # ❌ 删除线性缩放代码
+    # min_val = np.min(data)
+    # max_val = np.max(data)
+    # 
+    # # 线性缩放到1-100范围
+    # if max_val != min_val:  # 避免除零错误
+    #     data_scaled = (data - min_val) / (max_val - min_val) * 99 + 1
+    # else:
+    #     data_scaled = np.full_like(data, 50.5)  # 如果所有值相同，设为中间值
     
-    # 线性缩放到1-100范围
-    if max_val != min_val:  # 避免除零错误
-        data_scaled = (data - min_val) / (max_val - min_val) * 99 + 1
-    else:
-        data_scaled = np.full_like(data, 50.5)  # 如果所有值相同，设为中间值
-    
-    return data_scaled
+    # ✅ 直接返回原始数据
+    return data
 def generate_fama_french_datasets_with_shared_graph(
     num_datasets: int,
     T: int,
@@ -393,6 +428,357 @@ def generate_fama_french_datasets_with_shared_graph(
         pd.DataFrame(X, columns=col_names).to_csv(save_path, index=False)
         print(f"[{d+1}/{num_datasets}] Saved dataset to: {save_path}")
 
+def remove_balanced_samples(
+    source_dir: str,
+    label_file: str,
+    id_name: str,
+    label_name: str,
+    num_pos_to_remove: int = 0,
+    num_neg_to_remove: int = 0,
+    random_state: int = 42,
+    backup_dir: Optional[str] = None
+) -> dict:
+    """
+    从指定目录中删除指定数量的正负样本
+    
+    参数:
+        source_dir: 源数据目录路径
+        label_file: 标签文件路径
+        id_name: ID列名
+        label_name: 标签列名
+        num_pos_to_remove: 要删除的正样本数量
+        num_neg_to_remove: 要删除的负样本数量
+        random_state: 随机种子
+        backup_dir: 备份目录路径（可选），删除前备份文件
+    
+    返回:
+        dict: 删除统计信息
+    """
+    import pandas as pd
+    import numpy as np
+    import os
+    import shutil
+    from tqdm import tqdm
+    
+    # 设置随机种子
+    np.random.seed(random_state)
+    
+    # 读取标签文件
+    labels = pd.read_csv(label_file)
+    labels[id_name] = labels[id_name].astype(str)
+    
+    # 只保留源目录中实际存在的文件
+    labels['filepath'] = labels[id_name].apply(
+        lambda x: os.path.join(source_dir, f"{x}.csv")
+    )
+    existing_labels = labels[labels['filepath'].apply(os.path.isfile)].copy()
+    
+    print(f"📊 源目录 {source_dir} 中找到 {len(existing_labels)} 个有效文件")
+    
+    # 分离正负样本
+    pos_df = existing_labels[existing_labels[label_name] == 1]
+    neg_df = existing_labels[existing_labels[label_name] == 0]
+    
+    print(f"📊 当前样本分布: 正样本 {len(pos_df)} 个, 负样本 {len(neg_df)} 个")
+    
+    # 检查是否有足够的样本可删除
+    if len(pos_df) < num_pos_to_remove:
+        print(f"⚠️ 警告: 可用正样本 {len(pos_df)} 个，少于要删除的 {num_pos_to_remove} 个")
+        num_pos_to_remove = len(pos_df)
+        
+    if len(neg_df) < num_neg_to_remove:
+        print(f"⚠️ 警告: 可用负样本 {len(neg_df)} 个，少于要删除的 {num_neg_to_remove} 个")
+        num_neg_to_remove = len(neg_df)
+    
+    # 随机选择要删除的样本
+    to_remove_list = []
+    
+    if num_pos_to_remove > 0:
+        pos_to_remove = pos_df.sample(n=num_pos_to_remove, random_state=random_state)
+        to_remove_list.append(pos_to_remove)
+        print(f"🎯 选择删除 {len(pos_to_remove)} 个正样本")
+    
+    if num_neg_to_remove > 0:
+        neg_to_remove = neg_df.sample(n=num_neg_to_remove, random_state=random_state)
+        to_remove_list.append(neg_to_remove)
+        print(f"🎯 选择删除 {len(neg_to_remove)} 个负样本")
+    
+    if not to_remove_list:
+        print("ℹ️ 没有需要删除的文件")
+        return {
+            'removed_pos': 0,
+            'removed_neg': 0,
+            'total_removed': 0,
+            'remaining_pos': len(pos_df),
+            'remaining_neg': len(neg_df),
+            'backup_dir': backup_dir
+        }
+    
+    # 合并要删除的样本
+    to_remove = pd.concat(to_remove_list, ignore_index=True)
+    
+    # 创建备份目录（如果指定）
+    if backup_dir:
+        os.makedirs(backup_dir, exist_ok=True)
+        print(f"📦 创建备份目录: {backup_dir}")
+    
+    # 执行删除操作
+    removed_files = []
+    backup_files = []
+    
+    for _, row in tqdm(to_remove.iterrows(), total=len(to_remove), desc="删除文件"):
+        src_file = row['filepath']
+        filename = os.path.basename(src_file)
+        
+        try:
+            # 备份文件（如果指定了备份目录）
+            if backup_dir:
+                backup_path = os.path.join(backup_dir, filename)
+                shutil.copy2(src_file, backup_path)
+                backup_files.append(backup_path)
+            
+            # 删除原文件
+            os.remove(src_file)
+            removed_files.append(src_file)
+            
+        except Exception as e:
+            print(f"❌ 删除文件失败: {filename}, 错误: {e}")
+    
+    # 统计结果
+    removed_pos_count = len([f for f in removed_files if any(
+        row['filepath'] == f and row[label_name] == 1 
+        for _, row in to_remove.iterrows()
+    )])
+    
+    removed_neg_count = len(removed_files) - removed_pos_count
+    
+    remaining_pos = len(pos_df) - removed_pos_count
+    remaining_neg = len(neg_df) - removed_neg_count
+    
+    # 输出结果
+    print(f"\n✅ 删除操作完成:")
+    print(f"   删除正样本: {removed_pos_count} 个")
+    print(f"   删除负样本: {removed_neg_count} 个")
+    print(f"   总删除数量: {len(removed_files)} 个")
+    print(f"   剩余正样本: {remaining_pos} 个")
+    print(f"   剩余负样本: {remaining_neg} 个")
+    
+    if backup_dir:
+        print(f"   备份文件数: {len(backup_files)} 个 → {backup_dir}")
+    
+    return {
+        'removed_pos': removed_pos_count,
+        'removed_neg': removed_neg_count,
+        'total_removed': len(removed_files),
+        'remaining_pos': remaining_pos,
+        'remaining_neg': remaining_neg,
+        'removed_files': removed_files,
+        'backup_files': backup_files if backup_dir else [],
+        'backup_dir': backup_dir
+    }
+
+
+def restore_from_backup(backup_dir: str, target_dir: str):
+    """从备份目录恢复文件到目标目录"""
+    import shutil
+    from tqdm import tqdm
+    
+    if not os.path.exists(backup_dir):
+        print(f"❌ 备份目录不存在: {backup_dir}")
+        return
+    
+    backup_files = [f for f in os.listdir(backup_dir) if f.endswith('.csv')]
+    
+    if not backup_files:
+        print(f"⚠️ 备份目录中没有找到文件: {backup_dir}")
+        return
+    
+    os.makedirs(target_dir, exist_ok=True)
+    
+    restored_count = 0
+    for filename in tqdm(backup_files, desc="恢复文件"):
+        src = os.path.join(backup_dir, filename)
+        dst = os.path.join(target_dir, filename)
+        
+        try:
+            shutil.copy2(src, dst)
+            restored_count += 1
+        except Exception as e:
+            print(f"❌ 恢复失败: {filename}, 错误: {e}")
+    
+    print(f"✅ 成功恢复 {restored_count} 个文件到 {target_dir}")
+
+def cleanup_imputed_directories(
+    reference_dir: str = "./data/downstream", 
+    imputed_base_dir: str = "./data_imputed",
+    subfolder: str = "III",
+    backup_deleted: bool = True,
+    backup_base_dir: str = "./backup/cleanup"
+) -> dict:
+    """
+    清理填补结果目录，只保留与参考目录同名的文件
+    
+    参数:
+        reference_dir: 参考目录路径（如 ./data/downstream）
+        imputed_base_dir: 填补结果基础目录路径（如 ./data_imputed）
+        subfolder: 子文件夹名称（如 III）
+        backup_deleted: 是否备份被删除的文件
+        backup_base_dir: 备份基础目录路径
+    
+    返回:
+        dict: 清理统计信息
+    """
+    import os
+    import shutil
+    from tqdm import tqdm
+    from collections import defaultdict
+    
+    # 获取参考目录中的文件名集合
+    if not os.path.exists(reference_dir):
+        print(f"❌ 参考目录不存在: {reference_dir}")
+        return {}
+    
+    reference_files = set()
+    for f in os.listdir(reference_dir):
+        if f.endswith('.csv'):
+            reference_files.add(f)
+    
+    print(f"📂 参考目录 {reference_dir} 中找到 {len(reference_files)} 个CSV文件")
+    
+    if len(reference_files) == 0:
+        print("⚠️ 参考目录中没有CSV文件")
+        return {}
+    
+    # 查找所有需要清理的目录
+    target_dirs = []
+    if os.path.exists(imputed_base_dir):
+        for method_dir in os.listdir(imputed_base_dir):
+            method_path = os.path.join(imputed_base_dir, method_dir)
+            if os.path.isdir(method_path):
+                target_path = os.path.join(method_path, subfolder)
+                if os.path.exists(target_path):
+                    target_dirs.append((method_dir, target_path))
+    
+    if len(target_dirs) == 0:
+        print(f"⚠️ 在 {imputed_base_dir} 下没有找到包含 {subfolder} 子文件夹的目录")
+        return {}
+    
+    print(f"🎯 找到 {len(target_dirs)} 个需要清理的目录:")
+    for method_name, path in target_dirs:
+        print(f"   - {method_name}: {path}")
+    
+    # 统计信息
+    cleanup_stats = defaultdict(lambda: {
+        'total_files': 0,
+        'kept_files': 0,
+        'deleted_files': 0,
+        'deleted_list': [],
+        'backup_dir': None
+    })
+    
+    # 逐个目录清理
+    for method_name, target_path in target_dirs:
+        print(f"\n🧹 清理目录: {method_name}")
+        
+        # 获取当前目录中的所有CSV文件
+        current_files = []
+        for f in os.listdir(target_path):
+            if f.endswith('.csv'):
+                current_files.append(f)
+        
+        cleanup_stats[method_name]['total_files'] = len(current_files)
+        print(f"   📊 当前文件数: {len(current_files)}")
+        
+        # 找出需要删除的文件
+        files_to_delete = []
+        files_to_keep = []
+        
+        for f in current_files:
+            if f in reference_files:
+                files_to_keep.append(f)
+            else:
+                files_to_delete.append(f)
+        
+        cleanup_stats[method_name]['kept_files'] = len(files_to_keep)
+        cleanup_stats[method_name]['deleted_files'] = len(files_to_delete)
+        cleanup_stats[method_name]['deleted_list'] = files_to_delete.copy()
+        
+        print(f"   ✅ 保留文件: {len(files_to_keep)} 个")
+        print(f"   🗑️ 删除文件: {len(files_to_delete)} 个")
+        
+        if len(files_to_delete) == 0:
+            print(f"   ℹ️ {method_name} 目录无需清理")
+            continue
+        
+        # 创建备份目录（如果需要）
+        if backup_deleted and len(files_to_delete) > 0:
+            backup_dir = os.path.join(backup_base_dir, method_name, subfolder)
+            os.makedirs(backup_dir, exist_ok=True)
+            cleanup_stats[method_name]['backup_dir'] = backup_dir
+            print(f"   📦 备份目录: {backup_dir}")
+        
+        # 执行删除操作
+        deleted_count = 0
+        backup_count = 0
+        
+        for filename in tqdm(files_to_delete, desc=f"清理{method_name}", leave=False):
+            file_path = os.path.join(target_path, filename)
+            
+            try:
+                # 备份文件（如果需要）
+                if backup_deleted:
+                    backup_path = os.path.join(backup_dir, filename)
+                    shutil.copy2(file_path, backup_path)
+                    backup_count += 1
+                
+                # 删除原文件
+                os.remove(file_path)
+                deleted_count += 1
+                
+            except Exception as e:
+                print(f"   ❌ 处理文件失败: {filename}, 错误: {e}")
+        
+        print(f"   ✅ {method_name} 清理完成: 删除 {deleted_count} 个文件")
+        if backup_deleted:
+            print(f"   📦 备份 {backup_count} 个文件")
+    
+    # 输出总体统计
+    print(f"\n📊 清理总结:")
+    total_deleted = sum(stats['deleted_files'] for stats in cleanup_stats.values())
+    total_kept = sum(stats['kept_files'] for stats in cleanup_stats.values())
+    
+    print(f"   处理目录数: {len(cleanup_stats)}")
+    print(f"   总保留文件: {total_kept} 个")
+    print(f"   总删除文件: {total_deleted} 个")
+    
+    if backup_deleted and total_deleted > 0:
+        print(f"   备份位置: {backup_base_dir}")
+    
+    return dict(cleanup_stats)
+
+# # ✅ 使用示例3: 自定义备份位置
+# cleanup_stats = cleanup_imputed_directories(
+#     reference_dir="./data/downstreamIII",  # 如果参考目录是这个
+#     imputed_base_dir="./data_imputed",
+#     subfolder="III",
+#     backup_deleted=True,
+#     backup_base_dir="./backup/imputed_cleanup"  # 自定义备份位置
+# )
+
+# # 查看清理结果
+# print("\n📋 详细清理报告:")
+# for method, stats in cleanup_stats.items():
+#     print(f"\n🔧 {method}:")
+#     print(f"   原文件数: {stats['total_files']}")
+#     print(f"   保留文件: {stats['kept_files']}")
+#     print(f"   删除文件: {stats['deleted_files']}")
+#     if stats['backup_dir']:
+#         print(f"   备份位置: {stats['backup_dir']}")
+#     if len(stats['deleted_list']) <= 5:
+#         print(f"   删除列表: {stats['deleted_list']}")
+#     else:
+#         print(f"   删除文件示例: {stats['deleted_list'][:3]} ... (共{len(stats['deleted_list'])}个)")
+
 # copy_files("./ICU_Charts", "./data", 500, file_ext=".csv")
 # copy_files("source_folder", "destination_folder", -1, file_ext=".txt")
 # generate_sparse_matrix(50, 50, 3)
@@ -401,9 +787,9 @@ def generate_fama_french_datasets_with_shared_graph(
 #     label_file = "./AAAI_3_4_labels.csv",
 #     id_name = "ICUSTAY_ID",
 #     label_name = "DIEINHOSPITAL",
-#     target_dir = "./data/mimic-iii",
-#     num_pos = 300,
-#     num_neg = 300,
+#     target_dir = "./data/downstreamIII",
+#     num_pos = 400,
+#     num_neg = 0,
 #     random_state = 33
 # )
 # generate_and_save_lorenz_datasets(num_datasets=100, p=50, T=100, output_dir="./data/lorenz", causality_dir="./causality_matrices", seed_start=3)
