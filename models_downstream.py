@@ -257,18 +257,17 @@ def Prepare_data(data_dir, label_file=None, id_name=None, label_name=None):
 
 def train_fold(fold_args): 
     import torch
-    fold, train_idx, val_idx, data_arr, label_arr, epochs, lr, gpu_uuid, seed = fold_args
+    fold, train_idx, val_idx, test_idx, data_arr, label_arr, epochs, lr, gpu_uuid, seed = fold_args
 
     set_seed(seed + fold)
     torch.cuda.set_device(gpu_uuid)
     device = torch.device(f'cuda:{gpu_uuid}' if torch.cuda.is_available() else 'cpu')
 
-    dataset = MatrixDataset(data_arr, label_arr)
-
-    def worker_init_fn(worker_id):
-        np.random.seed(seed + fold + worker_id)
+    dataset = MatrixDataset(data_arr, label_arr) 
+    test_loader = DataLoader(Subset(dataset, test_idx), batch_size=16)
+    def worker_init_fn(worker_id): 
+        np.random.seed(seed + fold + worker_id) 
     
-    # 这里加入 drop_last=True
     train_loader = DataLoader(
         Subset(dataset, train_idx), 
         batch_size=16, 
@@ -307,7 +306,15 @@ def train_fold(fold_args):
             all_labels.extend(y.cpu().numpy())
             all_preds.extend(preds.cpu().numpy())
             all_scores.extend(probs.cpu().numpy())
-
+    with torch.no_grad():
+        dummy_preds, dummy_scores = [], []
+        for x, _ in test_loader:
+            logits = model(x.to(device))
+            probs = torch.sigmoid(logits)
+            preds = (probs > 0.5).float()
+            dummy_scores.extend(probs.cpu().numpy())
+            dummy_preds.extend(preds.cpu().numpy())
+        _ = (dummy_preds,dummy_scores)
     return (
         accuracy_score(all_labels, all_preds),
         precision_score(all_labels, all_preds, zero_division=0),
@@ -319,14 +326,20 @@ def train_fold(fold_args):
 def train_and_evaluate(data_arr, label_arr, k=5, epochs=200, lr=0.02, seed=42):
     from multiprocessing import get_context
     set_seed(seed)
-    
+    n = len(data_arr)
+    all_indices = np.arange(n)
+    rng = np.random.RandomState(seed)
+    rng.shuffle(all_indices)
+    test_size = max(1, int(0.1 * n))
+    test_idx = all_indices[:test_size]
+
     kf = KFold(n_splits=k, shuffle=True, random_state=seed)
     num_gpus = torch.cuda.device_count()
     tasks = []
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(data_arr)):
         physical_gpu_id = fold % num_gpus
-        tasks.append((fold, train_idx, val_idx, data_arr, label_arr, epochs, lr, physical_gpu_id, seed))
+        tasks.append((fold, train_idx, val_idx, test_idx, data_arr, label_arr, epochs, lr, physical_gpu_id, seed))
 
     with get_context("spawn").Pool(processes=min(k, num_gpus)) as pool:
         results = pool.map(train_fold, tasks)
@@ -336,9 +349,10 @@ def train_and_evaluate(data_arr, label_arr, k=5, epochs=200, lr=0.02, seed=42):
         'Accuracy': (np.mean(accs), np.std(accs)),
         'Precision': (np.mean(precs), np.std(precs)),
         'Recall': (np.mean(recs), np.std(recs)),
-        'F1': (np.mean(f1s), np.std(f1s)),
-        'AUROC': (np.mean(aurocs), np.std(aurocs)),
-    }
+        'F1': (np.mean(f1s), np.std(f1s)), 
+        'AUROC': (np.mean(aurocs), np.std(aurocs)), 
+    } 
+
 
 def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02, seed=42):
     set_seed(seed)

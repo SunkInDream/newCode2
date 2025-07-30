@@ -43,34 +43,59 @@ def random_impu(mx):
     mx[inds] = np.random.choice(non_nan_values, size=len(inds[0]), replace=True)
     return mx
 
-def knn_impu(mx, k=3):
+def knn_impu(mx, k=5):
+    import time
+    start_time = time.time()
+    
+    print(f"🔍 开始KNN填补: 数据形状={mx.shape}, 缺失值={np.isnan(mx).sum()}")
+    
     mx = mx.copy()
-    from sklearn.impute import KNNImputer
     
-    # ✅ 记录原始形状
-    original_shape = mx.shape
+    # ✅ 1. 设置单线程
+    import os
+    print("⚙️ 设置单线程模式...")
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
     
-    # ✅ 确保k不超过有效样本数
-    non_nan_rows = np.sum(~np.isnan(mx).any(axis=1))
-    if non_nan_rows == 0:
-        # 如果所有行都有缺失，用均值填补
-        return zero_impu(mx)
+    # ✅ 2. 处理全空列
+    print("🔧 检查全空列...")
+    all_nan_cols = np.all(np.isnan(mx), axis=0)
+    if all_nan_cols.any():
+        print(f"   发现 {all_nan_cols.sum()} 个全空列，用全局均值填充")
+        global_mean = np.nanmean(mx)
+        if np.isnan(global_mean):
+            global_mean = 0.0
+        mx[:, all_nan_cols] = global_mean
+    else:
+        print("   无全空列")
     
-    k = min(k, max(1, non_nan_rows - 1))
+    # ✅ 3. 调整k值
+    print("📊 调整KNN参数...")
+    valid_samples = (~np.isnan(mx)).sum(axis=0).min()
+    original_k = k
+    k = min(k, max(1, valid_samples - 1))
+    print(f"   k值: {original_k} -> {k}")
     
+    # ✅ 4. 开始KNN填补
+    print("🚀 开始KNN计算...")
     try:
+        from sklearn.impute import KNNImputer
         imputer = KNNImputer(n_neighbors=k)
+        
+        print("   创建KNNImputer完成")
+        print("   开始fit_transform...")
+        
         result = imputer.fit_transform(mx)
         
-        # ✅ 确保输出形状与输入一致
-        if result.shape != original_shape:
-            result = result[:original_shape[0], :original_shape[1]]
-            
+        elapsed = time.time() - start_time
+        print(f"✅ KNN填补完成，耗时 {elapsed:.2f} 秒")
         return result
         
     except Exception as e:
-        print(f"KNN imputation failed: {e}, falling back to mean imputation")
-        return mean_impu(mx)
+        elapsed = time.time() - start_time
+        print(f"❌ KNN填补在 {elapsed:.2f} 秒后失败: {e}")
+        raise e
         
 
 def mice_impu(mx, max_iter=5):

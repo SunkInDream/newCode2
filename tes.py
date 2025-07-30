@@ -316,113 +316,135 @@
 
 # if __name__ == "__main__":
 #     main()
-import numpy as np
-import torch
-from sklearn.impute import KNNImputer  # 备用
+# import numpy as np
+# import torch
+# from sklearn.impute import KNNImputer  # 备用
+# import os
+
+# def mean_impu(mx):
+#     import pandas as pd
+#     return pd.DataFrame(mx).fillna(pd.DataFrame(mx).mean()).to_numpy()
+
+# def saits_impu(mx, epochs=None, d_model=None, n_layers=None, device=None):
+#     from pypots.imputation import SAITS
+
+#     mx = mx.copy()
+#     seq_len, n_features = mx.shape
+#     total_size = seq_len * n_features
+
+#     # 全局均值
+#     global_mean = np.nanmean(mx)
+#     if np.isnan(global_mean):
+#         global_mean = 0.0
+
+#     # 全列NaN先填充
+#     all_nan_cols = np.all(np.isnan(mx), axis=0)
+#     if all_nan_cols.any():
+#         mx[:, all_nan_cols] = global_mean
+
+#     # 自动配置参数（比之前更轻）
+#     if epochs is None:
+#         if total_size > 50000:
+#             epochs = 10
+#             d_model = 16
+#             n_layers = 1
+#         elif total_size > 10000:
+#             epochs = 10
+#             d_model = 32
+#             n_layers = 1
+#         else:
+#             epochs = 20
+#             d_model = 32
+#             n_layers = 1
+
+#     if d_model is None:
+#         d_model = min(64, max(16, n_features * 2))
+
+#     if n_layers is None:
+#         n_layers = 1
+
+#     try:
+#         data_3d = mx[np.newaxis, :, :]
+
+#         saits = SAITS(
+#             n_steps=seq_len,
+#             n_features=n_features,
+#             n_layers=n_layers,
+#             d_model=d_model,
+#             n_heads=min(2, max(1, d_model // 32)),
+#             d_k=max(4, d_model // 8),
+#             d_v=max(4, d_model // 8),
+#             d_ffn=d_model,
+#             dropout=0.1,
+#             epochs=epochs,
+#             patience=5,
+#             batch_size=16,  # 降低 batch size
+#             device=device or ('cuda' if torch.cuda.is_available() else 'cpu'),
+#         )
+
+#         train_set = {"X": data_3d}
+#         saits.fit(train_set)
+#         imputed_data_3d = saits.impute(train_set)
+#         return imputed_data_3d[0]
+
+#     except Exception as e:
+#         print(f"SAITS fails: {e}")
+#         return mean_impu(mx)
+# from multiprocessing import Pool
+# import pandas as pd
+
+# def process_file_saits(task):
+#     input_path, output_dir, gpu_id = task
+#     try:
+#         # 固定该进程只用一个 GPU
+#         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+#         df = pd.read_csv(input_path)
+#         mx = df.to_numpy(dtype=float)
+
+#         result = saits_impu(mx)  # 轻量版
+
+#         os.makedirs(output_dir, exist_ok=True)
+#         out_file = os.path.join(output_dir, os.path.basename(input_path))
+#         pd.DataFrame(result, columns=df.columns).to_csv(out_file, index=False)
+#         return f"[GPU {gpu_id}] Done: {os.path.basename(input_path)}"
+#     except Exception as e:
+#         return f"[GPU {gpu_id}] Failed: {os.path.basename(input_path)} -> {e}"
+
+# def parallel_saits_impute(input_dir, output_dir, num_gpus=2, workers_per_gpu=1):
+#     files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith(".csv")]
+#     tasks = []
+#     gpu_list = list(range(num_gpus))
+#     for i, f in enumerate(files):
+#         gpu_id = gpu_list[i % num_gpus]
+#         tasks.append((f, output_dir, gpu_id))
+
+#     with Pool(num_gpus * workers_per_gpu) as pool:
+#         for res in pool.imap_unordered(process_file_saits, tasks):
+#             print(res)
+# if __name__ == "__main__":
+#     input_dir = "./data/downstreamIII"
+#     output_dir = "./data_imputed/saits/III"
+#     parallel_saits_impute(input_dir, output_dir, num_gpus=2, workers_per_gpu=1)
+# ===============================
+# 选项 2: 每个文件单独计算 std
+# ===============================
 import os
-
-def mean_impu(mx):
-    import pandas as pd
-    return pd.DataFrame(mx).fillna(pd.DataFrame(mx).mean()).to_numpy()
-
-def saits_impu(mx, epochs=None, d_model=None, n_layers=None, device=None):
-    from pypots.imputation import SAITS
-
-    mx = mx.copy()
-    seq_len, n_features = mx.shape
-    total_size = seq_len * n_features
-
-    # 全局均值
-    global_mean = np.nanmean(mx)
-    if np.isnan(global_mean):
-        global_mean = 0.0
-
-    # 全列NaN先填充
-    all_nan_cols = np.all(np.isnan(mx), axis=0)
-    if all_nan_cols.any():
-        mx[:, all_nan_cols] = global_mean
-
-    # 自动配置参数（比之前更轻）
-    if epochs is None:
-        if total_size > 50000:
-            epochs = 10
-            d_model = 16
-            n_layers = 1
-        elif total_size > 10000:
-            epochs = 10
-            d_model = 32
-            n_layers = 1
-        else:
-            epochs = 20
-            d_model = 32
-            n_layers = 1
-
-    if d_model is None:
-        d_model = min(64, max(16, n_features * 2))
-
-    if n_layers is None:
-        n_layers = 1
-
-    try:
-        data_3d = mx[np.newaxis, :, :]
-
-        saits = SAITS(
-            n_steps=seq_len,
-            n_features=n_features,
-            n_layers=n_layers,
-            d_model=d_model,
-            n_heads=min(2, max(1, d_model // 32)),
-            d_k=max(4, d_model // 8),
-            d_v=max(4, d_model // 8),
-            d_ffn=d_model,
-            dropout=0.1,
-            epochs=epochs,
-            patience=5,
-            batch_size=16,  # 降低 batch size
-            device=device or ('cuda' if torch.cuda.is_available() else 'cpu'),
-        )
-
-        train_set = {"X": data_3d}
-        saits.fit(train_set)
-        imputed_data_3d = saits.impute(train_set)
-        return imputed_data_3d[0]
-
-    except Exception as e:
-        print(f"SAITS fails: {e}")
-        return mean_impu(mx)
-from multiprocessing import Pool
+import numpy as np
 import pandas as pd
 
-def process_file_saits(task):
-    input_path, output_dir, gpu_id = task
-    try:
-        # 固定该进程只用一个 GPU
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+# 文件夹路径
+folder = "./data/air"
 
-        df = pd.read_csv(input_path)
-        mx = df.to_numpy(dtype=float)
 
-        result = saits_impu(mx)  # 轻量版
+all_values = []
 
-        os.makedirs(output_dir, exist_ok=True)
-        out_file = os.path.join(output_dir, os.path.basename(input_path))
-        pd.DataFrame(result, columns=df.columns).to_csv(out_file, index=False)
-        return f"[GPU {gpu_id}] Done: {os.path.basename(input_path)}"
-    except Exception as e:
-        return f"[GPU {gpu_id}] Failed: {os.path.basename(input_path)} -> {e}"
+for fname in os.listdir(folder):
+    if fname.endswith(".csv"):
+        fpath = os.path.join(folder, fname)
+        df = pd.read_csv(fpath)
+        all_values.append(df.values.flatten())
 
-def parallel_saits_impute(input_dir, output_dir, num_gpus=2, workers_per_gpu=1):
-    files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith(".csv")]
-    tasks = []
-    gpu_list = list(range(num_gpus))
-    for i, f in enumerate(files):
-        gpu_id = gpu_list[i % num_gpus]
-        tasks.append((f, output_dir, gpu_id))
-
-    with Pool(num_gpus * workers_per_gpu) as pool:
-        for res in pool.imap_unordered(process_file_saits, tasks):
-            print(res)
-if __name__ == "__main__":
-    input_dir = "./data/downstreamIII"
-    output_dir = "./data_imputed/saits/III"
-    parallel_saits_impute(input_dir, output_dir, num_gpus=2, workers_per_gpu=1)
+all_values = np.concatenate(all_values)
+global_mean = np.mean(all_values)
+print(f"全局 mean = {global_mean}")

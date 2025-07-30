@@ -136,7 +136,7 @@ def initial_process(matrix, threshold=0.8, perturbation_prob=0.1, perturbation_s
     matrix = SecondProcess(matrix, perturbation_prob, perturbation_scale)
     return matrix
 
-def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=None, ifGt=False, gt=None, seed=42):
+def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=None, ifGt=False, gt=None, ablation=0, seed=42):
     """添加seed参数"""
     
     # ✅ 设置种子确保训练过程可重复
@@ -162,10 +162,24 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
 
     # ✅ 创建模型前再次设置种子
     set_seed_all(seed)
-    model = ParallelFeatureADDSTCN(
-        causal_matrix=causal_matrix,
-        model_params=model_params
-    ).to(device)
+    if ablation==0:
+        ablation_causal = causal_matrix.copy()
+        ablation_causal = ablation_causal[...]==1
+        model = ParallelFeatureADDSTCN(
+            causal_matrix=ablation_causal,
+            model_params=model_params
+        ).to(device)
+    elif ablation==1:
+        model = ParallelFeatureADDSTCN(
+            causal_matrix=causal_matrix,
+            model_params=model_params
+        ).to(device)
+    elif ablation==2:
+        model = MultiADDSTCN(
+            causal_mask=causal_matrix,
+            num_levels=4,
+            cuda=True
+        ).to(device)
 
     # 编译加速
     if hasattr(torch, 'compile'):
@@ -292,7 +306,7 @@ def impute_wrapper(args):
         import os
 
         # ✅ 解包新增的 skip_existing 参数
-        if len(args) == 10:  # 新版本有10个参数
+        if len(args) == 11:  # 新版本有10个参数
             idx, mx, file_path, causal_matrix, gpu_id, output_dir, model_params, epochs, lr, skip_existing = args
         else:  # 兼容旧版本（9个参数）
             idx, mx, file_path, causal_matrix, gpu_id, output_dir, model_params, epochs, lr = args
@@ -420,7 +434,7 @@ def agregate(initial_filled_array, n_cluster):
 
     return idx_arr
 
-def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standard_cg=None,
+def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standard_cg=None,met='lorenz',
                      params={
                          'layers': 6,
                          'kernel_size': 6,
@@ -478,12 +492,13 @@ def causal_discovery(original_matrix_arr, n_cluster=5, isStandard=False, standar
         else:
             top5 = np.argsort(col_values)[-4:]
             new_matrix[top5, col] = 1
+    pd.DataFrame(new_matrix).to_csv(f'./causality_matrices/{met}_causality_matrix.csv', index=False, header=False)
     return new_matrix
 
 # ================================
 # 1. 单文件评估函数
 # ================================
-def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lorenz', seed=42):
+def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lorenz', missing='mar', seed=42, ablation=0):
     """添加seed参数控制随机性"""
     
     # ✅ 每次调用都重新设置种子，确保挖洞过程可重复
@@ -503,15 +518,21 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lore
         
         # 先设置一次种子确保mar_logistic的确定性
         set_seed_all(seed)
-        # X = mar_logistic(mx, obs_rate=0.1, missing_rate=0.6)
+        if missing == 'mar':
+            X = mar_logistic(mx, obs_rate=0.1, missing_rate=0.6)
         
         # 后续步骤也需要保持确定性
-        X = mx.copy()
-        X = X[np.newaxis, ...]  
-        X = mnar_x(X, offset=0.6)
-        # X = mcar(X, p=0.5)
-        X = X.squeeze(0)
-       
+        if missing == 'mnar':
+            X = mx.copy()
+            X = X[np.newaxis, ...]  
+            X = mnar_x(X, offset=0.6)
+            X = X.squeeze(0)
+        
+        if missing == 'mcar':
+            X = mx.copy()
+            X = X[np.newaxis, ...]  
+            X = mcar(X, p=0.5)
+            X = X.squeeze(0)
         pre_checkee(X, met)
         print(f"✅ 挖洞完成，缺失率: {np.isnan(X).sum() / X.size:.2%}")
         
@@ -548,13 +569,15 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lore
     imputed_result, mask, initial_processed = impute(
         X, causal_matrix,
         model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
-        epochs=100, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt, seed=seed  # ✅ 传递种子
+        epochs=100, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt, seed=seed, ablation=ablation
     )
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
     gc.collect()
-    
-    res['my_model'] = mse(imputed_result, gt2, mask)
+    if ablation==1:
+        res['ablation1'] = mse(imputed_result, gt2, mask)
+    elif ablation==2:
+        res['ablation2'] = mse(imputed_result, gt2, mask)
 
     def is_reasonable_mse(mse_value, threshold=1000000.0):
         return (not np.isnan(mse_value) and 
@@ -565,22 +588,21 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lore
     baseline = [
         ('initial_process', initial_process),
         ('zero_impu', zero_impu),
-        ('mean_impu', mean_impu),
-        ('median_impu', median_impu),
-        ('mode_impu', mode_impu),
-        ('random_impu', random_impu), 
-        ('knn_impu', knn_impu),
-        ('mice_impu', mice_impu),
-        ('ffill_impu', ffill_impu), 
-        ('bfill_impu', bfill_impu),
-        ('miracle_impu', miracle_impu), 
-        ('saits_impu', saits_impu),
-        ('timemixerpp_impu', timemixerpp_impu), 
-        ('tefn_impu', tefn_impu),
-        ('timesnet_impu', timesnet_impu),
-        ('tsde_impu', tsde_impu),
-        ('grin_impu', grin_impu),
+        # ('mean_impu', mean_impu),
+        # ('knn_impu', knn_impu),
+        # ('mice_impu', mice_impu),
+        # ('ffill_impu', ffill_impu), 
+        # ('bfill_impu', bfill_impu),
+        # ('miracle_impu', miracle_impu), 
+        # ('saits_impu', saits_impu),
+        # ('timemixerpp_impu', timemixerpp_impu), 
+        # ('tefn_impu', tefn_impu),
+        # ('timesnet_impu', timesnet_impu),
+        # ('tsde_impu', tsde_impu),
+        # ('grin_impu', grin_impu),
     ]
+    if not ablation:
+        res['my_model'] = mse(imputed_result, gt2, Mask)
 
     for name, fn in baseline:
         print(f"开始执行 {name}...")
@@ -623,7 +645,7 @@ def worker_wrapper(args):
     import torch
     import os
 
-    idx, mx, causal_matrix, gpu_id, met, seed = args  # ✅ 添加seed参数
+    idx, mx, causal_matrix, gpu_id, met, missing, seed, ablation = args  # ✅ 添加seed参数
 
     # ✅ 每个worker进程都设置相同的基础种子
     set_seed_all(seed + idx)  # 每个样本使用不同但确定的种子
@@ -639,13 +661,13 @@ def worker_wrapper(args):
         print(f"[Worker PID {os.getpid()}] 警告：未检测到 GPU，使用 CPU")
 
     # ✅ 传递种子到评估函数
-    res = mse_evaluate_single_file(mx, causal_matrix, gpu_id=gpu_id, device=device, met=met, seed=seed + idx)
+    res = mse_evaluate_single_file(mx, causal_matrix, gpu_id=gpu_id, device=device, met=met, missing=missing, seed=seed + idx, ablation=ablation)
     return idx, res
 
 # ================================
 # 3. 并行调度函数（进程池实现）
 # ================================
-def parallel_mse_evaluate(res_list, causal_matrix, met, simultaneous_per_gpu=3, seed=42):
+def parallel_mse_evaluate(res_list, causal_matrix, met, simultaneous_per_gpu=3, missing='mar', seed=42, ablation=0):
     """添加seed参数"""
     
     # ✅ 设置主进程种子
@@ -671,7 +693,7 @@ def parallel_mse_evaluate(res_list, causal_matrix, met, simultaneous_per_gpu=3, 
 
     # ✅ 为每个任务分配对应的 GPU 和种子
     gpu_ids = [i % num_gpus for i in range(len(res_list))]
-    args_list = [(i, res_list[i], causal_matrix, gpu_ids[i], met, seed) for i in range(len(res_list))]
+    args_list = [(i, res_list[i], causal_matrix, gpu_ids[i], met, missing, seed, ablation) for i in range(len(res_list))]
 
     with mp.Pool(processes=max_workers) as pool:
         results = list(tqdm(pool.imap(worker_wrapper, args_list), total=len(args_list), desc="All‑tasks"))
