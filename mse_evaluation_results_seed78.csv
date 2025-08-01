@@ -1,0 +1,4 @@
+Method,Average_MSE,Seed
+ablation3,11.15047103881836,78
+initial_process,9.177503056526184,78
+zero_impu,15.455781345367432,78

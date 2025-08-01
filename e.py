@@ -229,7 +229,7 @@ def pre_checkee(z,m='lorenz'):
     elif m=='var':
         q=15
     elif m=='air':
-        q=2
+        q=0
     elif m=='finance':
         q=10
     else:

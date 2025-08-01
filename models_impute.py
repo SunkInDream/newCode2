@@ -146,10 +146,16 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
     print('missing_count', np.isnan(original).sum())
     
     # 预处理
-    first = FirstProcess(original.copy())
-    mask = (~np.isnan(first)).astype(int)
-    initial_filled = SecondProcess(first)
-    initial_filled_copy = initial_filled.copy()
+    if ablation == 3:
+        first = FirstProcess(original.copy())
+        mask = (~np.isnan(first)).astype(int)
+        initial_filled = zero_impu(first)
+        initial_filled_copy = initial_filled.copy()
+    else:
+        first = FirstProcess(original.copy())
+        mask = (~np.isnan(first)).astype(int)
+        initial_filled = SecondProcess(first)
+        initial_filled_copy = initial_filled.copy()
     
     # 标准化
     scaler = StandardScaler()
@@ -162,14 +168,14 @@ def impute(original, causal_matrix, model_params, epochs=100, lr=0.02, gpu_id=No
 
     # ✅ 创建模型前再次设置种子
     set_seed_all(seed)
-    if ablation==0:
+    if ablation==1:
         ablation_causal = causal_matrix.copy()
         ablation_causal = ablation_causal[...]==1
         model = ParallelFeatureADDSTCN(
             causal_matrix=ablation_causal,
             model_params=model_params
         ).to(device)
-    elif ablation==1:
+    elif ablation==0 or ablation==3:
         model = ParallelFeatureADDSTCN(
             causal_matrix=causal_matrix,
             model_params=model_params
@@ -566,18 +572,20 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lore
     # ✅ 我的模型评估 - 传递种子
     print("开始执行 my_model...")
     set_seed_all(seed)  # 确保模型训练也是确定的
-    imputed_result, mask, initial_processed = impute(
-        X, causal_matrix,
-        model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
-        epochs=100, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt, seed=seed, ablation=ablation
-    )
+    # imputed_result, mask, initial_processed = impute(
+    #     X, causal_matrix,
+    #     model_params={'num_levels':10, 'kernel_size': 8, 'dilation_c': 2},
+    #     epochs=100, lr=0.02, gpu_id=gpu_id, ifGt=True, gt=gt, seed=seed, ablation=ablation
+    # )
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
     gc.collect()
-    if ablation==1:
-        res['ablation1'] = mse(imputed_result, gt2, mask)
-    elif ablation==2:
-        res['ablation2'] = mse(imputed_result, gt2, mask)
+    # if ablation==1:
+    #     res['ablation1'] = mse(imputed_result, gt2, mask)
+    # elif ablation==2:
+    #     res['ablation2'] = mse(imputed_result, gt2, mask)
+    # elif ablation==3:
+    #     res['ablation3'] = mse(imputed_result, gt2, mask)
 
     def is_reasonable_mse(mse_value, threshold=1000000.0):
         return (not np.isnan(mse_value) and 
@@ -586,7 +594,7 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lore
 
     # ✅ baseline 方法 - 每个方法执行前都设置种子
     baseline = [
-        ('initial_process', initial_process),
+        # ('initial_process', initial_process),
         ('zero_impu', zero_impu),
         # ('mean_impu', mean_impu),
         # ('knn_impu', knn_impu),
@@ -597,12 +605,12 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lore
         # ('saits_impu', saits_impu),
         # ('timemixerpp_impu', timemixerpp_impu), 
         # ('tefn_impu', tefn_impu),
-        # ('timesnet_impu', timesnet_impu),
+        ('timesnet_impu', timesnet_impu),
         # ('tsde_impu', tsde_impu),
         # ('grin_impu', grin_impu),
     ]
-    if not ablation:
-        res['my_model'] = mse(imputed_result, gt2, Mask)
+    # if not ablation:
+    #     res['my_model'] = mse(imputed_result, gt2, mask)
 
     for name, fn in baseline:
         print(f"开始执行 {name}...")

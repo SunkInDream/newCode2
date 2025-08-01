@@ -436,7 +436,9 @@ import pandas as pd
 # 文件夹路径
 folder = "./data/air"
 
-
+# ===============================
+# 选项 1: 全局 std（所有文件合起来）
+# ===============================
 all_values = []
 
 for fname in os.listdir(folder):
@@ -445,6 +447,7 @@ for fname in os.listdir(folder):
         df = pd.read_csv(fpath)
         all_values.append(df.values.flatten())
 
+# 拼接成一个大数组
 all_values = np.concatenate(all_values)
-global_mean = np.mean(all_values)
-print(f"全局 mean = {global_mean}")
+global_std = np.std(all_values, ddof=0)  # 总体标准差
+print(f"全局 std = {global_std}")

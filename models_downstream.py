@@ -279,7 +279,7 @@ def train_fold(fold_args):
     val_loader = DataLoader(Subset(dataset, val_idx), batch_size=16)
 
     set_seed(seed + fold)
-    model = SimpleGRUClassifier(input_dim=data_arr[0].shape[1]).to(device)
+    model = SimpleLSTMClassifier(input_dim=data_arr[0].shape[1]).to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
@@ -354,10 +354,11 @@ def train_and_evaluate(data_arr, label_arr, k=5, epochs=200, lr=0.02, seed=42):
     } 
 
 
-def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02, seed=42):
+def evaluate_downstream(data_arr, label_arr, k=4, epochs=100, lr=0.02, seed=42, tag='DIEINHOSPITAL'):
+    """评估下游任务"""
     set_seed(seed)
     results = {}
-    tag = "FirstICU24_AKI_ALL"
+    tag = tag
     methods = [
         ('Scit-Impute', lambda: Prepare_data('./data_imputed/my_model/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', tag)),
         ('GRIN-Impute', lambda:  Prepare_data('./data_imputed/grin/III', './AAAI_3_4_labels.csv', 'ICUSTAY_ID', tag)),
