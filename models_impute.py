@@ -521,7 +521,6 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lore
     # ✅ 挖洞过程 - 在设置种子后立即执行
     try:
         print(f"🔍 开始挖洞过程 (seed={seed})...")
-        
         # 先设置一次种子确保mar_logistic的确定性
         set_seed_all(seed)
         if missing == 'mar':
@@ -538,7 +537,7 @@ def mse_evaluate_single_file(mx, causal_matrix, gpu_id=0, device=None, met='lore
             X = mx.copy()
             X = X[np.newaxis, ...]  
             X = mcar(X, p=0.5)
-            X = X.squeeze(0)
+            X = X.squeeze(0)                                                                                                                                                        
         pre_checkee(X, met)
         print(f"✅ 挖洞完成，缺失率: {np.isnan(X).sum() / X.size:.2%}")
         
