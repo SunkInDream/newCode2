@@ -101,11 +101,11 @@ class TSDE_Imputer(nn.Module):
             samples.append(xt)
         samples = torch.stack(samples, dim=1)
         result = torch.median(samples, dim=1)[0]
-        return mask * x_obs + (1 - mask) * result  # 强制还原观测值
+        return mask * x_obs + (1 - mask) * result  
 
 def impute_missing_data(data: np.ndarray, n_samples=50, device="cuda", epochs=200) -> np.ndarray:
     if not isinstance(data, np.ndarray) or data.ndim != 2:
-        raise ValueError("输入数据必须是二维 numpy 数组")
+        raise ValueError("error")
 
     B, F = data.shape
     mask = ~np.isnan(data)
@@ -113,11 +113,9 @@ def impute_missing_data(data: np.ndarray, n_samples=50, device="cuda", epochs=20
     col_means[np.isnan(col_means)] = 0
     filled = np.where(mask, data, col_means)
 
-    # 标准化
     mean, std = np.nanmean(filled), np.nanstd(filled) + 1e-6
     normed = (filled - mean) / std
 
-    # 构造张量
     x = torch.FloatTensor(normed).unsqueeze(0).to(device)
     m = torch.FloatTensor(mask.astype(float)).unsqueeze(0).to(device)
 
