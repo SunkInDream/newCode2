@@ -15,7 +15,7 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     SEED = 42
     set_seed(SEED)
-    met = 'lorenz'
+    met = 'var'
     missing = 'mar'
     tag = 'FirstICU24_AKI_ALL'
 

@@ -1,0 +1,4 @@
+group,chosen_index,chosen_file,distance_to_mean_curve_z2
+1,32,./data/lorenz/lorenz_dataset_39_timeseries.csv,4684.945991258531
+2,55,./data/lorenz/lorenz_dataset_5_timeseries.csv,4768.907981334845
+3,60,./data/lorenz/lorenz_dataset_64_timeseries.csv,4794.418298750765

@@ -16,6 +16,7 @@ from pygrinder import (
 
 from sklearn.cluster import KMeans
 from baseline import *
+from models_GNN import *
 from e import pre_checkee
 from sklearn.preprocessing import StandardScaler
 from multiprocessing import set_start_method
@@ -188,7 +189,8 @@ def impute(
         ablation_causal = ablation_causal[...] == 1
         model = ParallelFeatureADDSTCN(causal_matrix=ablation_causal, model_params=model_params).to(device)
     elif ablation == 0 or ablation == 3:
-        model = ParallelFeatureADDSTCN(causal_matrix=causal_matrix, model_params=model_params).to(device)
+        # model = ParallelFeatureADDSTCN(causal_matrix=causal_matrix, model_params=model_params).to(device)
+        model = ParallelFeatureGNN(causal_matrix=causal_matrix, model_params=model_params, cuda=True).to(device)
     elif ablation == 2:
         model = MultiADDSTCN(causal_mask=causal_matrix, num_levels=4, cuda=True).to(device)
 
@@ -448,6 +450,199 @@ def agregate(initial_filled_array, n_cluster):
     return idx_arr
 
 
+import math
+import gc
+from typing import List, Tuple, Dict
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+
+# =========================
+# In-memory multi-trajectory clustering with REAL medoid per group
+# (standardizes features across all samples/time, fits poly-in-time per group,
+# then chooses the nearest REAL sample in standardized space as representative)
+# =========================
+
+def _build_time_design(T: int, degree: int) -> np.ndarray:
+    t = np.linspace(0.0, 1.0, T)
+    X = np.vstack([t ** d for d in range(degree + 1)]).T  # (T, P)
+    return X
+
+
+def _init_by_kmeans(vecs: np.ndarray, k: int, max_iter: int = 50, seed: int = 42) -> Tuple[np.ndarray, np.ndarray]:
+    rng = np.random.RandomState(seed)
+    N, D = vecs.shape
+    centroids = np.empty((k, D))
+    # k-means++ init
+    centroids[0] = vecs[rng.randint(N)]
+    for c in range(1, k):
+        dists = np.min(((vecs[:, None, :] - centroids[None, :c, :]) ** 2).sum(axis=2), axis=1)
+        probs = dists / (dists.sum() + 1e-12)
+        idx = rng.choice(N, p=probs)
+        centroids[c] = vecs[idx]
+
+    labels = np.zeros(N, dtype=int)
+    for _ in range(max_iter):
+        d2 = ((vecs[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
+        new_labels = np.argmin(d2, axis=1)
+        if np.all(new_labels == labels):
+            break
+        labels = new_labels
+        for c in range(k):
+            mask = labels == c
+            if mask.any():
+                centroids[c] = vecs[mask].mean(axis=0)
+            else:
+                centroids[c] = vecs[rng.randint(N)]
+    return centroids, labels
+
+
+def _weighted_least_squares(X: np.ndarray, Y: np.ndarray, w: np.ndarray) -> Tuple[np.ndarray, float]:
+    w = np.asarray(w, dtype=float) + 1e-12
+    WX = X * w[:, None]
+    XtWX = X.T @ WX
+    XtWy = X.T @ (w * Y)
+    reg = 1e-6 * np.eye(XtWX.shape[0])
+    beta = np.linalg.solve(XtWX + reg, XtWy)
+    resid = Y - X @ beta
+    eff_dof = max(w.sum() - X.shape[1], 1.0)
+    sigma2 = float((w * resid ** 2).sum() / eff_dof)
+    sigma2 = max(sigma2, 1e-8)
+    return beta, sigma2
+
+
+def cluster_pick_medoids_from_arrays(
+    matrices: List[np.ndarray],
+    n_groups: int = 3,
+    degree: int = 2,
+    max_em_iter: int = 100,
+    tol: float = 1e-4,
+    seed: int = 42,
+) -> Dict[str, any]:
+    """
+    Args:
+        matrices: list of (T, F) arrays. All must share the same shape.
+    Returns:
+        {
+          "rep_indices": List[int],                # one medoid index per group (length n_groups)
+          "rep_distances": List[float],            # z-space Frobenius^2 distance to group mean curve
+          "assignments_hard": np.ndarray,          # (N,) hard group labels in [0..n_groups-1]
+          "responsibilities": np.ndarray,          # (N, n_groups)
+          "group_means_z": List[np.ndarray],       # each (T, F) standardized mean curve X @ beta^T
+        }
+    """
+    assert len(matrices) > 0, "Empty matrices list."
+    shapes = {m.shape for m in matrices}
+    assert len(shapes) == 1, f"All matrices must have the same shape, found: {shapes}"
+    T, F = matrices[0].shape
+    N = len(matrices)
+
+    # Stack and standardize per-feature across all samples/time
+    Y = np.stack(matrices, axis=0)  # (N, T, F)
+    Y_flat = Y.reshape(N * T, F)
+    meanF = Y_flat.mean(axis=0, keepdims=True)
+    stdF = Y_flat.std(axis=0, keepdims=True) + 1e-12
+    Yz = (Y_flat - meanF) / stdF
+    Yz = Yz.reshape(N, T, F)
+
+    X = _build_time_design(T, degree)  # (T, P)
+    P = X.shape[1]
+
+    # Init responsibilities via k-means on flattened standardized series
+    vecs = Yz.reshape(N, T * F)
+    _, labels = _init_by_kmeans(vecs, n_groups, seed=seed)
+    R = np.zeros((N, n_groups))
+    R[np.arange(N), labels] = 1.0
+
+    rng = np.random.RandomState(seed)
+    pi = R.mean(axis=0)
+    beta = rng.normal(scale=0.01, size=(n_groups, F, P))
+    sigma2 = np.ones((n_groups, F))
+
+    def sample_group_loglik(y_if: np.ndarray) -> np.ndarray:
+        ll = np.zeros(n_groups)
+        for g in range(n_groups):
+            means = X @ beta[g].T  # (T, F)
+            resid2 = (y_if - means) ** 2
+            s2 = sigma2[g][None, :]  # (1, F)
+            ll_f = -0.5 * (T * np.log(2 * np.pi * s2) + (resid2 / s2).sum(axis=0))
+            ll[g] = ll_f.sum()
+        return ll
+
+    prev_elbo = -np.inf
+    for it in range(max_em_iter):
+        # M-step
+        pi = R.mean(axis=0) + 1e-12
+        pi = pi / pi.sum()
+
+        # Weighted per-feature regression across all samples/time
+        X_stack = np.tile(X, (N, 1))  # (N*T, P)
+        for g in range(n_groups):
+            w_i = R[:, g]  # (N,)
+            w_stack = np.repeat(w_i, T)  # (N*T,)
+            for f in range(F):
+                y_stack = Yz[:, :, f].reshape(N * T)
+                b, s2 = _weighted_least_squares(X_stack, y_stack, w_stack)
+                beta[g, f, :] = b
+                sigma2[g, f] = s2
+
+        # E-step
+        log_pi = np.log(pi + 1e-12)
+        logR = np.zeros((N, n_groups))
+        for i in range(N):
+            ll = sample_group_loglik(Yz[i])
+            logR[i] = ll + log_pi
+        logR = logR - logR.max(axis=1, keepdims=True)
+        R_new = np.exp(logR)
+        R_new = R_new / R_new.sum(axis=1, keepdims=True)
+
+        # ELBO proxy for early stop
+        elbo = 0.0
+        for i in range(N):
+            ll = sample_group_loglik(Yz[i]) + log_pi
+            m = ll.max()
+            elbo += m + math.log(np.exp(ll - m).sum())
+
+        R = R_new
+        if it > 0 and abs(elbo - prev_elbo) < tol * (1 + abs(prev_elbo)):
+            break
+        prev_elbo = elbo
+
+    # Hard assignments
+    hard = R.argmax(axis=1)
+
+    # Group mean curves in standardized space
+    group_means_z = [(X @ beta[g].T) for g in range(n_groups)]  # list of (T, F)
+
+    # Pick medoid (nearest REAL sample in standardized space) per group
+    rep_indices: List[int] = []
+    rep_distances: List[float] = []
+    for g in range(n_groups):
+        members = np.where(hard == g)[0]
+        if members.size == 0:
+            # fallback: consider everyone
+            members = np.arange(N)
+        Mz = group_means_z[g]
+        dists = np.array([np.sum((Yz[i] - Mz) ** 2) for i in members])  # Frobenius^2
+        idx_local = members[np.argmin(dists)]
+        rep_indices.append(int(idx_local))
+        rep_distances.append(float(dists[np.argmin(dists)]))
+
+    return {
+        "rep_indices": rep_indices,
+        "rep_distances": rep_distances,
+        "assignments_hard": hard,
+        "responsibilities": R,
+        "group_means_z": group_means_z,
+    }
+
+
+# =========================
+# Your causal_discovery wired to the new clustering strategy
+# =========================
+
 def causal_discovery(
     original_matrix_arr,
     n_cluster=5,
@@ -463,33 +658,64 @@ def causal_discovery(
         "epochs": 100,
         "significance": 1.2,
     },
+    # clustering config
+    cluster_degree: int = 2,
+    cluster_seed: int = 42,
+    cluster_max_em_iter: int = 100,
+    cluster_tol: float = 1e-4,
 ):
+    """
+    Replaces the old 'agregate' step with polynomial-in-time EM clustering
+    and REAL medoid selection per group.
+
+    Expects:
+      - initial_process(matrix) and parallel_compute_causal_matrices(data_list, params_list)
+        to be defined elsewhere in your codebase.
+    """
     if isStandard:
         if standard_cg is None:
             raise ValueError("standard_cg must be provided when isStandard is True")
         return pd.read_csv(standard_cg, header=None).values
 
-    # Step 1: batch preprocessing
+    # ---------- Step 1: batch preprocessing ----------
     initial_matrix_arr = []
     batch_size = 100
 
     for i in tqdm(range(0, len(original_matrix_arr), batch_size), desc="Batch preprocessing"):
-        batch = original_matrix_arr[i : i + batch_size]
+        batch = original_matrix_arr[i: i + batch_size]
         batch_results = [initial_process(matrix) for matrix in batch]
         initial_matrix_arr.extend(batch_results)
 
         if i % (batch_size * 5) == 0:
             gc.collect()
 
-    # Step 2: clustering & representative extraction
-    idx_arr = agregate(initial_matrix_arr, n_cluster)
-    data_list = [initial_matrix_arr[idx] for idx in idx_arr]
+    if len(initial_matrix_arr) == 0:
+        raise ValueError("No matrices after preprocessing.")
+
+    # Validate shapes
+    shapes = {m.shape for m in initial_matrix_arr}
+    if len(shapes) != 1:
+        raise ValueError(f"All matrices must share the same shape after preprocessing, found: {shapes}")
+
+    # ---------- Step 2: clustering & representative extraction (NEW) ----------
+    cluster_res = cluster_pick_medoids_from_arrays(
+        matrices=initial_matrix_arr,
+        n_groups=n_cluster,
+        degree=cluster_degree,
+        max_em_iter=cluster_max_em_iter,
+        tol=cluster_tol,
+        seed=cluster_seed,
+    )
+    rep_indices: List[int] = cluster_res["rep_indices"]
+
+    # representatives as the list to feed downstream
+    data_list = [initial_matrix_arr[idx] for idx in rep_indices]
     params_list = [params] * len(data_list)
 
-    # Step 3: multi-GPU parallel causal discovery
+    # ---------- Step 3: multi-GPU parallel causal discovery ----------
     results = parallel_compute_causal_matrices(data_list, params_list)
 
-    # Step 4: aggregate results
+    # ---------- Step 4: aggregate results ----------
     cg_total = None
     for matrix in results:
         if matrix is None:
@@ -502,7 +728,7 @@ def causal_discovery(
     if cg_total is None:
         raise RuntimeError("All tasks failed; no valid causal matrix was obtained")
 
-    # Step 5: pick top-4 per column to construct final causal graph
+    # ---------- Step 5: pick top-4 per column to construct final causal graph ----------
     np.fill_diagonal(cg_total, 0)
     new_matrix = np.zeros_like(cg_total)
     for col in range(cg_total.shape[1]):
@@ -510,10 +736,14 @@ def causal_discovery(
         if np.count_nonzero(col_values) < 4:
             new_matrix[:, col] = 1
         else:
-            top5 = np.argsort(col_values)[-4:]
-            new_matrix[top5, col] = 1
-    pd.DataFrame(new_matrix).to_csv(f"./causality_matrices/{met}_causality_matrix.csv", index=False, header=False)
+            top4 = np.argsort(col_values)[-4:]
+            new_matrix[top4, col] = 1
+
+    pd.DataFrame(new_matrix).to_csv(
+        f"./causality_matrices/{met}_causality_matrix.csv", index=False, header=False
+    )
     return new_matrix
+
 
 
 # ================================
